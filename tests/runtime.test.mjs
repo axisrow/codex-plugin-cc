@@ -775,6 +775,32 @@ test("resume validates the persisted thread provider even when current config us
   assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.turnId, initialTurnId);
 });
 
+test("resume validates effort against the persisted thread model instead of current config", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "config-luna");
+  initGitRepo(repo);
+
+  const first = run(
+    "node",
+    [SCRIPT, "task", "--model", "gpt-5.6-sol", "--effort", "high", "initial task"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+  assert.equal(first.status, 0, first.stderr);
+
+  const resumed = run("node", [SCRIPT, "task", "--resume", "--effort", "ultra", "follow up"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(resumed.status, 0, resumed.stderr);
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(state.lastThreadResume.model, "gpt-5.6-sol");
+  assert.equal(state.lastTurnStart.model, null);
+  assert.equal(state.lastTurnStart.effort, "ultra");
+});
+
 test("task --fresh is treated as routing control and does not leak into the prompt", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

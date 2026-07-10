@@ -1104,7 +1104,9 @@ export async function runAppServerTurn(cwd, options = {}) {
     let threadId;
     let threadSelection;
 
-    await validateExplicitReasoningSelection(client, cwd, options);
+    if (!options.resumeThreadId) {
+      await validateExplicitReasoningSelection(client, cwd, options);
+    }
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");

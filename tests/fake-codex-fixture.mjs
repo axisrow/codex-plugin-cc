@@ -106,6 +106,11 @@ function buildConfigReadResult() {
 	        config: { model_provider: "openai", model: "gpt-5.6-luna", model_reasoning_effort: "ultra" },
 	        origins: {}
 	      };
+	    case "config-luna":
+	      return {
+	        config: { model_provider: "openai", model: "gpt-5.6-luna", model_reasoning_effort: "high" },
+	        origins: {}
+	      };
     case "env-key-provider":
       return {
         config: {
@@ -337,6 +342,8 @@ rl.on("line", (line) => {
 	        const selectedModel = message.params.model || inheritedSelection?.model || "gpt-5.4";
 	        const selectedEffort = message.params.config?.model_reasoning_effort || inheritedSelection?.effort || null;
 	        const modelProvider = BEHAVIOR === "custom-provider" ? "custom" : "openai";
+	        thread.model = selectedModel;
+	        thread.reasoningEffort = selectedEffort;
 	        state.lastThreadStart = {
 	          model: selectedModel,
 	          effort: selectedEffort,
@@ -377,8 +384,8 @@ rl.on("line", (line) => {
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
         saveState(state);
-	        const selectedModel = message.params.model || "gpt-5.4";
-	        const selectedEffort = BEHAVIOR === "inherited-sol-max" ? "max" : null;
+	        const selectedModel = message.params.model || thread.model || "gpt-5.4";
+	        const selectedEffort = BEHAVIOR === "inherited-sol-max" ? "max" : thread.reasoningEffort || null;
 	        state.lastThreadResume = { model: selectedModel, effort: selectedEffort };
 	        saveState(state);
 	        send({ id: message.id, result: { thread: buildThread(thread), model: selectedModel, modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: selectedEffort } });
@@ -511,8 +518,10 @@ rl.on("line", (line) => {
           .filter((item) => item.type === "text")
           .map((item) => item.text)
           .join("\\n");
-        const turnId = nextTurnId(state);
-        thread.updatedAt = now();
+	        const turnId = nextTurnId(state);
+	        thread.updatedAt = now();
+	        thread.model = message.params.model ?? thread.model ?? null;
+	        thread.reasoningEffort = message.params.effort ?? thread.reasoningEffort ?? null;
 	        state.lastTurnStart = {
 	          threadId: message.params.threadId,
 	          turnId,
