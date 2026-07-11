@@ -25,6 +25,8 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /run_in_background:\s*true/);
   assert.match(source, /command:\s*`node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" review "\$ARGUMENTS"`/);
   assert.match(source, /description:\s*"Codex review"/);
+  assert.match(source, /\[--model <model\|spark>\] \[--effort <none\|minimal\|low\|medium\|high\|xhigh>\]/);
+  assert.match(source, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(source, /Do not call `BashOutput`/);
   assert.match(source, /Return the command stdout verbatim, exactly as-is/i);
   assert.match(source, /git status --short --untracked-files=all/);
@@ -49,10 +51,12 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /```bash/);
   assert.match(source, /```typescript/);
   assert.match(source, /adversarial-review "\$ARGUMENTS"/);
-  assert.match(source, /\[--scope auto\|working-tree\|branch\] \[focus \.\.\.\]/);
+  assert.match(source, /\[--scope auto\|working-tree\|branch\].*\[focus \.\.\.\]/s);
   assert.match(source, /run_in_background:\s*true/);
   assert.match(source, /command:\s*`node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" adversarial-review "\$ARGUMENTS"`/);
   assert.match(source, /description:\s*"Codex adversarial review"/);
+  assert.match(source, /\[--model <model\|spark>\] \[--effort <none\|minimal\|low\|medium\|high\|xhigh>\] \[focus \.\.\.\]/);
+  assert.match(source, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(source, /Do not call `BashOutput`/);
   assert.match(source, /Return the command stdout verbatim, exactly as-is/i);
   assert.match(source, /git status --short --untracked-files=all/);

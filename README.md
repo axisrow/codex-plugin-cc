@@ -86,13 +86,14 @@ Use it when you want:
 - a review of your current uncommitted changes
 - a review of your branch compared to a base branch like `main`
 
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
+Use `--base <ref>` for branch review. It also supports `--wait`, `--background`, `--model <model|spark>`, and `--effort <none|minimal|low|medium|high|xhigh>`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
 
 Examples:
 
 ```bash
 /codex:review
 /codex:review --base main
+/codex:review --model spark --effort medium
 /codex:review --background
 ```
 
@@ -105,7 +106,7 @@ Runs a **steerable** review that questions the chosen implementation and design.
 It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
 
 It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+It also supports `--wait`, `--background`, `--model <model|spark>`, and `--effort <none|minimal|low|medium|high|xhigh>`. Unlike `/codex:review`, it can take extra focus text after the flags.
 
 Use it when you want:
 
@@ -118,6 +119,7 @@ Examples:
 ```bash
 /codex:adversarial-review
 /codex:adversarial-review --base main challenge whether this was the right caching and retry design
+/codex:adversarial-review --model gpt-5.4-mini --effort high look for race conditions and question the chosen approach
 /codex:adversarial-review --background look for race conditions and question the chosen approach
 ```
 

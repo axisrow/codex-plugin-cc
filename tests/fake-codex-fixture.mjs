@@ -412,6 +412,14 @@ rl.on("line", (line) => {
           send({ method: "thread/started", params: { thread: { id: reviewThread.id } } });
         }
         const turnId = nextTurnId(state);
+        state.lastReviewStart = {
+          threadId: message.params.threadId,
+          reviewThreadId: reviewThread.id,
+          model: message.params.model ?? null,
+          effort: message.params.effort ?? null,
+          target: message.params.target
+        };
+        saveState(state);
         send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
         emitTurnCompleted(reviewThread.id, turnId, [
           {

@@ -1026,7 +1026,9 @@ export async function runAppServerReview(cwd, options = {}) {
         client.request("review/start", {
           threadId: sourceThreadId,
           delivery,
-          target: options.target
+          target: options.target,
+          model: options.model ?? null,
+          effort: options.effort ?? null
         }),
       {
         onProgress: options.onProgress,
