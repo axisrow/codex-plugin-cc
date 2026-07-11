@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -8,7 +9,11 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir } from "./helpers.mjs";
 import { withBrokerLock } from "../plugins/codex/scripts/lib/broker-lock.mjs";
-import { loadBrokerSession, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import {
+  loadBrokerSession,
+  loadReusableBrokerSession,
+  sendBrokerShutdown
+} from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,6 +37,47 @@ function startEnsureProcess(cwd, env) {
   return new Promise((resolve) => {
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+async function startProbeBroker(socketPath, { busy }) {
+  const requests = [];
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        newlineIndex = buffer.indexOf("\n");
+        if (!line.trim()) {
+          continue;
+        }
+        const message = JSON.parse(line);
+        requests.push(message.method);
+        if (message.method === "initialize") {
+          socket.write('{"id":1,"result":{"userAgent":"probe"}}\n');
+        } else if (message.method === "thread/list") {
+          socket.write(
+            busy
+              ? '{"id":2,"error":{"code":-32001,"message":"Shared Codex broker is busy."}}\n'
+              : '{"id":2,"result":{"data":[],"nextCursor":null}}\n'
+          );
+        } else if (message.method === "broker/shutdown") {
+          socket.write('{"id":1,"result":{}}\n');
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  return {
+    requests,
+    close: async () => {
+      await new Promise((resolve) => server.close(resolve));
+      fs.rmSync(socketPath, { force: true });
+    }
+  };
 }
 
 test("concurrent startup creates and records only one shared broker", async () => {
@@ -66,4 +112,48 @@ test("broker lock recovers immediately when its owner process is gone", async ()
 
   assert.equal(result, "acquired");
   assert.equal(fs.existsSync(path.join(stateDir, "broker.lock")), false);
+});
+
+test("stale reachable brokers are preserved when the broker reports an active turn", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const sessionDir = makeTempDir();
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const probeBroker = await startProbeBroker(socketPath, { busy: true });
+  installFakeCodex(binDir, "review-ok", "codex-cli 0.144.0");
+  initGitRepo(repo);
+
+  const stateDir = resolveStateDir(repo);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "broker.json"),
+    `${JSON.stringify(
+      {
+        endpoint: `unix:${socketPath}`,
+        pidFile: path.join(sessionDir, "broker.pid"),
+        logFile: path.join(sessionDir, "broker.log"),
+        sessionDir,
+        pid: 999999,
+        runtime: { pluginVersion: "1.0.6", codexVersion: "codex-cli 0.143.0" }
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  let killed = false;
+  const options = {
+    env: buildEnv(binDir),
+    killProcess: () => {
+      killed = true;
+    }
+  };
+  const result = await loadReusableBrokerSession(repo, options);
+
+  assert.equal(result, null);
+  assert.equal(killed, false);
+  assert.equal(options.deferBrokerReplacement, true);
+  assert.equal(probeBroker.requests.includes("broker/shutdown"), false);
+  assert.equal(fs.existsSync(path.join(stateDir, "broker.json")), true);
+  await probeBroker.close();
 });

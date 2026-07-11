@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { withBrokerLock } from "./broker-lock.mjs";
+import { probeBroker } from "./broker-probe.mjs";
 import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
@@ -60,18 +61,22 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
 }
 
 export async function sendBrokerShutdown(endpoint) {
-  await new Promise((resolve) => {
+  return new Promise((resolve) => {
     const socket = connectToEndpoint(endpoint);
     socket.setEncoding("utf8");
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
-    socket.on("data", () => {
+    socket.on("data", (chunk) => {
       socket.end();
-      resolve();
+      try {
+        resolve(!JSON.parse(String(chunk).trim()).error);
+      } catch {
+        resolve(false);
+      }
     });
-    socket.on("error", resolve);
-    socket.on("close", resolve);
+    socket.on("error", () => resolve(false));
+    socket.on("close", () => resolve(false));
   });
 }
 
@@ -154,7 +159,15 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
 
   if (existing) {
     if (await isBrokerEndpointReady(existing.endpoint)) {
-      await sendBrokerShutdown(existing.endpoint);
+      const brokerStatus = await probeBroker(existing.endpoint, cwd);
+      if (brokerStatus !== "idle") {
+        options.deferBrokerReplacement = true;
+        return null;
+      }
+      if (!(await sendBrokerShutdown(existing.endpoint))) {
+        options.deferBrokerReplacement = true;
+        return null;
+      }
     }
     teardownExistingBroker(cwd, existing, options.killProcess ?? terminateProcessTree);
   }
@@ -169,7 +182,7 @@ export async function loadReusableBrokerSession(cwd, options = {}) {
 export async function ensureBrokerSession(cwd, options = {}) {
   return withBrokerLock(cwd, options, async () => {
     const existing = await loadReusableBrokerSessionUnlocked(cwd, options);
-    if (existing) {
+    if (existing || options.deferBrokerReplacement) {
       return existing;
     }
 

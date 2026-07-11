@@ -65,8 +65,8 @@ export async function validateReasoningSelection(client, selection = {}) {
   );
 }
 
-export async function validateExplicitReasoningSelection(client, cwd, selection = {}) {
-  if (!selection.model && !selection.effort) {
+export async function validateExplicitReasoningSelection(client, cwd, selection = {}, options = {}) {
+  if (!selection.model && !selection.effort && !options.includeInherited) {
     return;
   }
 

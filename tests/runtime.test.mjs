@@ -935,6 +935,7 @@ test("task validates model and effort inherited from Codex config", () => {
 test("task rejects an unsupported model and effort inherited from Codex config", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
   installFakeCodex(binDir, "inherited-luna-ultra");
   initGitRepo(repo);
 
@@ -945,6 +946,7 @@ test("task rejects an unsupported model and effort inherited from Codex config",
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Reasoning effort "ultra" is not supported by model "gpt-5\.6-luna"/i);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).threads.length, 0);
 });
 
 test("task prevalidates a partial explicit selection against Codex config", () => {

@@ -1105,7 +1105,9 @@ export async function runAppServerTurn(cwd, options = {}) {
     let threadSelection;
 
     if (!options.resumeThreadId) {
-      await validateExplicitReasoningSelection(client, cwd, options);
+      await validateExplicitReasoningSelection(client, cwd, options, {
+        includeInherited: options.persistThread === true
+      });
     }
 
     if (options.resumeThreadId) {
