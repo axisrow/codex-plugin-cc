@@ -63,14 +63,21 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
 export async function sendBrokerShutdown(endpoint) {
   return new Promise((resolve) => {
     const socket = connectToEndpoint(endpoint);
+    let buffer = "";
     socket.setEncoding("utf8");
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
     socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex);
       socket.end();
       try {
-        resolve(!JSON.parse(String(chunk).trim()).error);
+        resolve(!JSON.parse(line.trim()).error);
       } catch {
         resolve(false);
       }

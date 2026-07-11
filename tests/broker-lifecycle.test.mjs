@@ -39,7 +39,7 @@ function startEnsureProcess(cwd, env) {
   });
 }
 
-async function startProbeBroker(socketPath, { busy }) {
+async function startProbeBroker(socketPath, { busy, shutdownResponseChunks = ['{"id":1,"result":{}}\n'] }) {
   const requests = [];
   const server = net.createServer((socket) => {
     socket.setEncoding("utf8");
@@ -65,7 +65,9 @@ async function startProbeBroker(socketPath, { busy }) {
               : '{"id":2,"result":{"data":[],"nextCursor":null}}\n'
           );
         } else if (message.method === "broker/shutdown") {
-          socket.write('{"id":1,"result":{}}\n');
+          for (const chunk of shutdownResponseChunks) {
+            socket.write(chunk);
+          }
         }
       }
     });
@@ -155,5 +157,17 @@ test("stale reachable brokers are preserved when the broker reports an active tu
   assert.equal(options.deferBrokerReplacement, true);
   assert.equal(probeBroker.requests.includes("broker/shutdown"), false);
   assert.equal(fs.existsSync(path.join(stateDir, "broker.json")), true);
+  await probeBroker.close();
+});
+
+test("broker shutdown accepts a response split across socket chunks", async () => {
+  const sessionDir = makeTempDir();
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const probeBroker = await startProbeBroker(socketPath, {
+    busy: false,
+    shutdownResponseChunks: ['{"id":1,"result":', '{}', '}\n']
+  });
+
+  assert.equal(await sendBrokerShutdown(`unix:${socketPath}`), true);
   await probeBroker.close();
 });
