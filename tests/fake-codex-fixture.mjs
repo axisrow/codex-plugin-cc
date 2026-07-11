@@ -347,7 +347,8 @@ rl.on("line", (line) => {
 	        state.lastThreadStart = {
 	          model: selectedModel,
 	          effort: selectedEffort,
-	          config: message.params.config ?? null
+	          config: message.params.config ?? null,
+	          sandbox: message.params.sandbox ?? null
 	        };
 	        saveState(state);
 	        send({ id: message.id, result: { thread: buildThread(thread), model: selectedModel, modelProvider, serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: selectedEffort } });
@@ -386,7 +387,11 @@ rl.on("line", (line) => {
         saveState(state);
 	        const selectedModel = message.params.model || thread.model || "gpt-5.4";
 	        const selectedEffort = BEHAVIOR === "inherited-sol-max" ? "max" : thread.reasoningEffort || null;
-	        state.lastThreadResume = { model: selectedModel, effort: selectedEffort };
+	        state.lastThreadResume = {
+	          model: selectedModel,
+	          effort: selectedEffort,
+	          sandbox: message.params.sandbox ?? null
+	        };
 	        saveState(state);
 	        send({ id: message.id, result: { thread: buildThread(thread), model: selectedModel, modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: selectedEffort } });
 	        break;
