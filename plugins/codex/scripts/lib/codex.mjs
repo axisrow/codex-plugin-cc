@@ -1052,7 +1052,7 @@ export async function runAppServerReview(cwd, options = {}) {
       error: turnState.error,
       stderr: cleanCodexStderr(client.stderr)
     };
-  }, { model: options.model });
+  }, { model: options.model, effort: options.effort });
 }
 
 export async function importExternalAgentSession(cwd, options = {}) {
@@ -1156,7 +1156,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       commandExecutions: turnState.commandExecutions
     };
-  }, { model: options.model });
+  }, { model: options.model, effort: options.effort });
 }
 
 export async function findLatestTaskThread(cwd) {

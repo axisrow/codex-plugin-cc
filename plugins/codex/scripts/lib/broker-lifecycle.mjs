@@ -56,11 +56,14 @@ export async function sendBrokerShutdown(endpoint) {
   });
 }
 
-export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, model, env = process.env }) {
+export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, model, effort, env = process.env }) {
   const logFd = fs.openSync(logFile, "a");
   const args = [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile];
   if (model) {
     args.push("--model", String(model));
+  }
+  if (effort) {
+    args.push("--effort", String(effort));
   }
   const child = spawn(process.execPath, args, {
     cwd,
@@ -117,7 +120,15 @@ async function isBrokerEndpointReady(endpoint) {
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
   if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
-    return existing;
+    // Reuse the warm broker only when it was spawned with the same model/effort
+    // override the caller is requesting now. model/effort are baked in at spawn
+    // (they reach `codex app-server` via `-c` argv), so a differing override
+    // cannot take effect on an already-running broker — respawn instead.
+    const sameModel = (existing.model ?? null) === (options.model ?? null);
+    const sameEffort = (existing.effort ?? null) === (options.effort ?? null);
+    if (sameModel && sameEffort) {
+      return existing;
+    }
   }
 
   if (existing) {
@@ -148,6 +159,7 @@ export async function ensureBrokerSession(cwd, options = {}) {
     pidFile,
     logFile,
     model: options.model,
+    effort: options.effort,
     env: options.env ?? process.env
   });
 
@@ -169,7 +181,9 @@ export async function ensureBrokerSession(cwd, options = {}) {
     pidFile,
     logFile,
     sessionDir,
-    pid: child.pid ?? null
+    pid: child.pid ?? null,
+    model: options.model ?? null,
+    effort: options.effort ?? null
   };
   saveBrokerSession(cwd, session);
   return session;

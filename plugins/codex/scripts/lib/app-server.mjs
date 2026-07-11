@@ -191,6 +191,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     if (this.options.model) {
       args.push("-c", `model=${JSON.stringify(String(this.options.model))}`);
     }
+    if (this.options.effort) {
+      args.push("-c", `model_reasoning_effort=${JSON.stringify(String(this.options.effort))}`);
+    }
     this.proc = spawn("codex", args, {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
@@ -345,7 +348,7 @@ export class CodexAppServerClient {
         brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
-        const brokerSession = await ensureBrokerSession(cwd, { env: options.env, model: options.model });
+        const brokerSession = await ensureBrokerSession(cwd, { env: options.env, model: options.model, effort: options.effort });
         brokerEndpoint = brokerSession?.endpoint ?? null;
       }
     }
