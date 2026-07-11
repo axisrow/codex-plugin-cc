@@ -19,7 +19,7 @@ const readline = require("node:readline");
 
 	function loadState() {
 	  if (!fs.existsSync(STATE_PATH)) {
-	    return { nextThreadId: 1, nextTurnId: 1, appServerStarts: 0, threads: [], capabilities: null, lastInterrupt: null };
+	    return { nextThreadId: 1, nextTurnId: 1, appServerStarts: 0, threads: [], capabilities: null, lastInterrupt: null, lastAppServerSpawnArgs: null, lastReviewStart: null };
 	  }
 	  return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
 	}
@@ -272,6 +272,7 @@ if (args[0] !== "app-server") {
 }
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+bootState.lastAppServerSpawnArgs = args;
 saveState(bootState);
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -412,6 +413,14 @@ rl.on("line", (line) => {
           send({ method: "thread/started", params: { thread: { id: reviewThread.id } } });
         }
         const turnId = nextTurnId(state);
+        state.lastReviewStart = {
+          threadId: message.params.threadId,
+          reviewThreadId: reviewThread.id,
+          model: message.params.model ?? null,
+          effort: message.params.effort ?? null,
+          target: message.params.target
+        };
+        saveState(state);
         send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
         emitTurnCompleted(reviewThread.id, turnId, [
           {

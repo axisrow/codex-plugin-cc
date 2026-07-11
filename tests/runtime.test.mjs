@@ -157,6 +157,34 @@ test("review renders a no-findings result from app-server review/start", () => {
   assert.match(result.stdout, /No material issues found/);
 });
 
+test("review --model --effort reach the codex app-server spawn argv as -c overrides", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.mkdirSync(path.join(repo, "src"));
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1;\n");
+  run("git", ["add", "src/app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review", "--model", "spark", "--effort", "high"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.ok(fakeState.lastAppServerSpawnArgs, "spawn args were recorded");
+  const argv = fakeState.lastAppServerSpawnArgs.join(" ");
+  // model/effort only take effect via -c config overrides at codex app-server spawn
+  // (review/start RPC params are dropped by the server), so the load-bearing assertion
+  // is that they reach the spawn argv.
+  assert.match(argv, /model="gpt-5\.3-codex-spark"/);
+  assert.match(argv, /model_reasoning_effort="high"/);
+});
+
 test("task runs when the active provider does not require OpenAI login", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -2149,6 +2177,51 @@ test("commands lazily start and reuse one shared app-server after first use", as
 
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
   assert.equal(fakeState.appServerStarts, 1);
+
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      cwd: repo
+    })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("a differing --effort override respawns the shared app-server broker instead of reusing the stale one", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const env = buildEnv(binDir);
+
+  // 1) Warm the broker with no override.
+  const first = run("node", [SCRIPT, "review"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+
+  const brokerSession = loadBrokerSession(repo);
+  if (!brokerSession) {
+    return;
+  }
+
+  // 2) Second call with a different effort override must respawn, not reuse.
+  const second = run("node", [SCRIPT, "review", "--effort", "high"], { cwd: repo, env });
+  assert.equal(second.status, 0, second.stderr);
+
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  // The warm broker was started without the override, so it must be torn down
+  // and a fresh one spawned with -c model_reasoning_effort="high".
+  assert.equal(fakeState.appServerStarts, 2);
+  const argv = (fakeState.lastAppServerSpawnArgs || []).join(" ");
+  assert.match(argv, /model_reasoning_effort="high"/);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
