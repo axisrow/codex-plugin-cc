@@ -335,13 +335,17 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
+    const brokerOptions = {
+      env: options.env,
+      allowBusyStaleBroker: options.allowBusyStaleBroker
+    };
     if (!options.disableBroker) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
       if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = (await loadReusableBrokerSession(cwd, { env: options.env }))?.endpoint ?? null;
+        brokerEndpoint = (await loadReusableBrokerSession(cwd, brokerOptions))?.endpoint ?? null;
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
-        const brokerSession = await ensureBrokerSession(cwd, { env: options.env });
+        const brokerSession = await ensureBrokerSession(cwd, brokerOptions);
         brokerEndpoint = brokerSession?.endpoint ?? null;
       }
     }

@@ -974,7 +974,10 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
 
   let client = null;
   try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+    client = await CodexAppServerClient.connect(cwd, {
+      reuseExistingBroker: true,
+      allowBusyStaleBroker: true
+    });
     await client.request("turn/interrupt", { threadId, turnId });
     return {
       attempted: true,

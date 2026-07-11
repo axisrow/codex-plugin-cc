@@ -41,7 +41,7 @@ export async function validateReasoningSelection(client, selection = {}) {
   const modelName = String(selection.model ?? "").trim();
   const effort = String(selection.effort ?? "").trim().toLowerCase();
   const provider = String(selection.modelProvider ?? "").trim().toLowerCase();
-  if (!modelName || !effort || provider !== "openai") {
+  if (!effort || provider !== "openai") {
     return;
   }
 
@@ -50,10 +50,13 @@ export async function validateReasoningSelection(client, selection = {}) {
     return;
   }
 
-  const model = catalog.find((candidate) => candidate.model === modelName || candidate.id === modelName);
+  const model = modelName
+    ? catalog.find((candidate) => candidate.model === modelName || candidate.id === modelName)
+    : catalog.find((candidate) => candidate.isDefault === true);
   if (!model) {
     return;
   }
+  const selectedModelName = model.model ?? model.id ?? modelName;
 
   const efforts = supportedEfforts(model);
   if (efforts.length === 0 || efforts.includes(effort)) {
@@ -61,7 +64,7 @@ export async function validateReasoningSelection(client, selection = {}) {
   }
 
   throw new Error(
-    `Reasoning effort "${effort}" is not supported by model "${modelName}". Supported efforts: ${efforts.join(", ")}.`
+    `Reasoning effort "${effort}" is not supported by model "${selectedModelName}". Supported efforts: ${efforts.join(", ")}.`
   );
 }
 

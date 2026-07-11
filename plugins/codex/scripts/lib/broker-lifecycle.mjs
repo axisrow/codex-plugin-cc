@@ -160,6 +160,9 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
   if (existing) {
     if (await isBrokerEndpointReady(existing.endpoint)) {
       const brokerStatus = await probeBroker(existing.endpoint, cwd);
+      if (brokerStatus === "busy" && options.allowBusyStaleBroker) {
+        return existing;
+      }
       if (brokerStatus !== "idle") {
         options.deferBrokerReplacement = true;
         return null;

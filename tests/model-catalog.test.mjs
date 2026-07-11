@@ -12,10 +12,11 @@ function clientWith(models) {
   };
 }
 
-function model(name, efforts) {
+function model(name, efforts, isDefault = false) {
   return {
     id: name,
     model: name,
+    isDefault,
     supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort }))
   };
 }
@@ -48,6 +49,17 @@ test("catalog rejects Luna with Ultra and lists supported efforts", async () => 
       modelProvider: "openai"
     }),
     /Reasoning effort "ultra" is not supported by model "gpt-5\.6-luna".*low, medium, high, xhigh, max/i
+  );
+});
+
+test("catalog validates effort against the default model when no model is selected", async () => {
+  const client = clientWith([
+    model("gpt-5.6-luna", ["low", "medium", "high", "xhigh", "max"], true)
+  ]);
+
+  await assert.rejects(
+    validateReasoningSelection(client, { effort: "ultra", modelProvider: "openai" }),
+    /Reasoning effort "ultra" is not supported by model "gpt-5\.6-luna"/i
   );
 });
 

@@ -106,6 +106,11 @@ function buildConfigReadResult() {
 	        config: { model_provider: "openai", model: "gpt-5.6-luna", model_reasoning_effort: "ultra" },
 	        origins: {}
 	      };
+	    case "inherited-default-luna-ultra":
+	      return {
+	        config: { model_provider: "openai", model_reasoning_effort: "ultra" },
+	        origins: {}
+	      };
 	    case "config-luna":
 	      return {
 	        config: { model_provider: "openai", model: "gpt-5.6-luna", model_reasoning_effort: "high" },
@@ -338,6 +343,8 @@ rl.on("line", (line) => {
 	          ? { model: "gpt-5.6-sol", effort: "max" }
 	          : BEHAVIOR === "inherited-luna-ultra"
 	            ? { model: "gpt-5.6-luna", effort: "ultra" }
+	            : BEHAVIOR === "inherited-default-luna-ultra"
+              ? { model: "gpt-5.6-luna", effort: "ultra" }
 	            : null;
 	        const selectedModel = message.params.model || inheritedSelection?.model || "gpt-5.4";
 	        const selectedEffort = message.params.config?.model_reasoning_effort || inheritedSelection?.effort || null;
@@ -405,6 +412,7 @@ rl.on("line", (line) => {
 	        const model = (name, efforts) => ({
 	          id: name,
 	          model: name,
+	          isDefault: BEHAVIOR === "inherited-default-luna-ultra" && name === "gpt-5.6-luna",
 	          hidden: false,
 	          supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort }))
 	        });

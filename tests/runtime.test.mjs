@@ -966,6 +966,23 @@ test("task prevalidates a partial explicit selection against Codex config", () =
   assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).threads.length, 0);
 });
 
+test("task prevalidates effort against the catalog default before creating a persistent thread", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "inherited-default-luna-ultra");
+  initGitRepo(repo);
+
+  const result = run("node", [SCRIPT, "task", "--effort", "ultra", "check default selection"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /not supported by model "gpt-5\.6-luna"/i);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).threads.length, 0);
+});
+
 test("task falls back cleanly when an older Codex CLI does not expose model/list", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -2040,6 +2057,8 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
     return null;
   }, { timeoutMs: 15000 });
 
+  installFakeCodex(binDir, "interruptible-slow-task", "codex-cli 0.144.0");
+
   const cancelResult = run("node", [SCRIPT, "cancel", jobId, "--json"], {
     cwd: repo,
     env
@@ -2061,6 +2080,7 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
     threadId: runningJob.threadId,
     turnId: runningJob.turnId
   });
+  assert.equal(fakeState.appServerStarts, 1);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
