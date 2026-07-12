@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { resolveStateDir } from "./state.mjs";
+import { terminateProcessTree } from "./process.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
@@ -132,13 +133,26 @@ export async function ensureBrokerSession(cwd, options = {}) {
   }
 
   if (existing) {
+    // The existing broker may still be live (this path now also runs on the
+    // override-differ respawn branch above). Ask it to shut down gracefully so
+    // it closes its codex app-server child, then tear down its files and
+    // belt-and-suspenders tree-kill in case the RPC doesn't land. Without this
+    // the detached+unref'd broker process (and its app-server child) would be
+    // orphaned indefinitely — only its socket file got unlinked before.
+    if (existing.endpoint) {
+      try {
+        await sendBrokerShutdown(existing.endpoint);
+      } catch {
+        // Broker may already be gone; the tree-kill below is the fallback.
+      }
+    }
     teardownBrokerSession({
       endpoint: existing.endpoint ?? null,
       pidFile: existing.pidFile ?? null,
       logFile: existing.logFile ?? null,
       sessionDir: existing.sessionDir ?? null,
       pid: existing.pid ?? null,
-      killProcess: options.killProcess ?? null
+      killProcess: options.killProcess ?? terminateProcessTree
     });
     clearBrokerSession(cwd);
   }
