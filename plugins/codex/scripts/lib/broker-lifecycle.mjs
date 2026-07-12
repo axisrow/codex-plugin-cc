@@ -41,19 +41,38 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
-export async function sendBrokerShutdown(endpoint) {
+export async function sendBrokerShutdown(endpoint, timeoutMs = 2000) {
   await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
     const socket = connectToEndpoint(endpoint);
+    const timer = setTimeout(() => {
+      // A wedged broker may accept the connection but never respond or close.
+      // Bound the wait so the caller can fall back to the process-tree kill.
+      try {
+        socket.destroy();
+      } catch {
+        // Ignore destroy errors on an already-closed socket.
+      }
+      finish();
+    }, timeoutMs);
     socket.setEncoding("utf8");
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
     socket.on("data", () => {
       socket.end();
-      resolve();
+      finish();
     });
-    socket.on("error", resolve);
-    socket.on("close", resolve);
+    socket.on("error", finish);
+    socket.on("close", finish);
   });
 }
 
