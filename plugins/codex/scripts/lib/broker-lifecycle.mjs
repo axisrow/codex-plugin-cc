@@ -139,7 +139,8 @@ async function isBrokerEndpointReady(endpoint) {
 
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  const existingReady = existing && (await isBrokerEndpointReady(existing.endpoint));
+  if (existing && existingReady) {
     // Reuse the warm broker only when it was spawned with the same model/effort
     // override the caller is requesting now. model/effort are baked in at spawn
     // (they reach `codex app-server` via `-c` argv), so a differing override
@@ -165,13 +166,19 @@ export async function ensureBrokerSession(cwd, options = {}) {
         // Broker may already be gone; the tree-kill below is the fallback.
       }
     }
+    // Only tree-kill by pid when we confirmed the broker endpoint was live, so
+    // the pid still belongs to our broker. A stale session whose endpoint is
+    // not ready likely points at a dead broker whose pid the OS may have
+    // reused for an unrelated process — in that case just drop the files and
+    // let any survivor exit on its own.
+    const killProcess = existingReady ? (options.killProcess ?? terminateProcessTree) : (options.killProcess ?? null);
     teardownBrokerSession({
       endpoint: existing.endpoint ?? null,
       pidFile: existing.pidFile ?? null,
       logFile: existing.logFile ?? null,
       sessionDir: existing.sessionDir ?? null,
       pid: existing.pid ?? null,
-      killProcess: options.killProcess ?? terminateProcessTree
+      killProcess
     });
     clearBrokerSession(cwd);
   }
