@@ -547,8 +547,9 @@ test("task --resume-last resumes the latest persisted task thread", () => {
   assert.equal(result.stdout, "Resumed the prior run.\nFollow-up prompt accepted.\n");
 });
 
-test("task-resume-candidate returns the latest rescue thread from the current session", () => {
+test("task-resume-candidate uses an explicit workspace cwd from an unrelated invocation directory", () => {
   const workspace = makeTempDir();
+  const invocationDir = makeTempDir();
   const stateDir = resolveStateDir(workspace);
   const jobsDir = path.join(stateDir, "jobs");
   fs.mkdirSync(jobsDir, { recursive: true });
@@ -598,8 +599,8 @@ test("task-resume-candidate returns the latest rescue thread from the current se
     "utf8"
   );
 
-  const result = run("node", [SCRIPT, "task-resume-candidate", "--json"], {
-    cwd: workspace,
+  const result = run("node", [SCRIPT, "task-resume-candidate", "-C", workspace, "--json"], {
+    cwd: invocationDir,
     env: {
       ...process.env,
       CODEX_COMPANION_SESSION_ID: "sess-current"
@@ -612,6 +613,17 @@ test("task-resume-candidate returns the latest rescue thread from the current se
   assert.equal(payload.sessionId, "sess-current");
   assert.equal(payload.candidate.id, "task-current");
   assert.equal(payload.candidate.threadId, "thr_current");
+});
+
+test("task-resume-candidate rejects a nonexistent explicit workspace cwd", () => {
+  const invocationDir = makeTempDir();
+  const missingDir = path.join(invocationDir, "missing-workspace");
+  const result = run("node", [SCRIPT, "task-resume-candidate", "--cwd", missingDir, "--json"], {
+    cwd: invocationDir
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Task workspace directory does not exist/);
 });
 
 test("task --resume-last does not resume a task from another Claude session", () => {

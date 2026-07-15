@@ -83,6 +83,15 @@ export function splitRawArgumentString(raw) {
 
     if (character === "\\") {
       const nextCharacter = raw[index + 1];
+      const characterAfterQuote = raw[index + 2];
+      const closesQuotedRegion =
+        quote !== null &&
+        nextCharacter === quote &&
+        (characterAfterQuote === undefined || /\s/.test(characterAfterQuote));
+      if (closesQuotedRegion) {
+        current += character;
+        continue;
+      }
       if (
         nextCharacter !== undefined &&
         (nextCharacter === "'" || nextCharacter === "\"" || nextCharacter === "\\" || /\s/.test(nextCharacter))

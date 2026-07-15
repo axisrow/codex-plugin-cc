@@ -17,8 +17,27 @@ test("splitRawArgumentString preserves a quoted Windows path with spaces", () =>
   ]);
 });
 
+test("splitRawArgumentString closes a quoted Windows path after a trailing backslash", () => {
+  assert.deepEqual(splitRawArgumentString(String.raw`--cwd "C:\Program Files\Repo\" --write`), [
+    "--cwd",
+    "C:\\Program Files\\Repo\\",
+    "--write"
+  ]);
+});
+
+test("splitRawArgumentString closes a final quoted Windows path after a trailing backslash", () => {
+  assert.deepEqual(splitRawArgumentString(String.raw`--cwd "C:\Program Files\Repo\"`), [
+    "--cwd",
+    "C:\\Program Files\\Repo\\"
+  ]);
+});
+
 test("splitRawArgumentString accepts an escaped quote inside double quotes", () => {
   assert.deepEqual(splitRawArgumentString(String.raw`"say \"hello\""`), ['say "hello"']);
+});
+
+test("splitRawArgumentString preserves an escaped quote before a non-boundary character", () => {
+  assert.deepEqual(splitRawArgumentString(String.raw`"say \"hi\"..."`), ['say "hi"...']);
 });
 
 test("splitRawArgumentString collapses an escaped backslash", () => {
