@@ -24,7 +24,7 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -40,6 +40,7 @@ import {
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
+  settleCancellationAfterTermination,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import {
@@ -1047,17 +1048,27 @@ async function handleCancel(argv) {
     );
   }
 
-  let termination;
+  let termination = null;
+  let terminationError = null;
   try {
     termination = terminateProcessTree(job.pid ?? Number.NaN);
   } catch (error) {
-    persistCancellation(job.pid ?? null);
-    throw error;
+    terminationError = error;
   }
 
-  const processStopped =
-    !Number.isFinite(job.pid) || termination.delivered || !isProcessAlive(job.pid);
-  const nextJob = persistCancellation(processStopped ? null : job.pid);
+  const outcome = settleCancellationAfterTermination(
+    workspaceRoot,
+    job,
+    existing,
+    termination,
+    terminationError
+  );
+  if (!outcome.processStopped) {
+    appendLogLine(job.logFile, outcome.job.errorMessage);
+    throw outcome.error;
+  }
+
+  const nextJob = persistCancellation(null);
 
   const payload = {
     jobId: job.id,

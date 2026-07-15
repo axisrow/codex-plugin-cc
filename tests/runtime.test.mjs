@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import {
+  resolveCancelableJob,
+  settleCancellationAfterTermination
+} from "../plugins/codex/scripts/lib/job-control.mjs";
 import { resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
@@ -1733,6 +1737,118 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
   const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
   assert.equal(stored.status, "cancelled");
   assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
+});
+
+test("failed cancellation restores a live job so cancellation can be retried", () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-cancel-failed-live",
+    status: "running",
+    phase: "investigating",
+    title: "Codex Task",
+    jobClass: "task",
+    pid: process.pid
+  };
+  const existing = {
+    ...job,
+    request: {
+      cwd: workspace,
+      prompt: "Investigate the flaky test"
+    }
+  };
+  const completedAt = "2026-03-18T15:31:00.000Z";
+
+  writeJobFile(workspace, job.id, {
+    ...existing,
+    status: "cancelled",
+    phase: "cancelled",
+    completedAt,
+    cancelledAt: completedAt,
+    errorMessage: "Cancelled by user."
+  });
+  upsertJob(workspace, {
+    ...job,
+    status: "cancelled",
+    phase: "cancelled",
+    completedAt,
+    errorMessage: "Cancelled by user."
+  });
+
+  const terminationError = new Error("Access is denied.");
+  const outcome = settleCancellationAfterTermination(
+    workspace,
+    job,
+    existing,
+    null,
+    terminationError,
+    { isProcessAliveImpl: () => true }
+  );
+
+  assert.equal(outcome.processStopped, false);
+  assert.equal(outcome.error, terminationError);
+  assert.equal(outcome.job.status, "running");
+  assert.equal(outcome.job.pid, process.pid);
+  assert.match(outcome.job.errorMessage, /retry \/codex:cancel/i);
+
+  const retryable = resolveCancelableJob(workspace, job.id);
+  assert.equal(retryable.job.status, "running");
+  assert.equal(retryable.job.pid, process.pid);
+
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(resolveStateDir(workspace), "jobs", `${job.id}.json`), "utf8")
+  );
+  assert.equal(stored.status, "running");
+  assert.equal(stored.phase, "investigating");
+  assert.equal(stored.pid, process.pid);
+  assert.equal("completedAt" in stored, false);
+  assert.equal("cancelledAt" in stored, false);
+  assert.match(stored.errorMessage, /retry \/codex:cancel/i);
+});
+
+test("failed cancellation remains cancelled when the process is already dead", () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-cancel-failed-dead",
+    status: "running",
+    phase: "investigating",
+    title: "Codex Task",
+    jobClass: "task",
+    pid: 999999
+  };
+  const existing = { ...job };
+  const completedAt = "2026-03-18T15:31:00.000Z";
+  const cancelledJob = {
+    ...job,
+    status: "cancelled",
+    phase: "cancelled",
+    completedAt,
+    errorMessage: "Cancelled by user."
+  };
+
+  writeJobFile(workspace, job.id, {
+    ...cancelledJob,
+    cancelledAt: completedAt
+  });
+  upsertJob(workspace, cancelledJob);
+
+  const outcome = settleCancellationAfterTermination(
+    workspace,
+    job,
+    existing,
+    { attempted: true, delivered: false, method: "taskkill" },
+    null,
+    { isProcessAliveImpl: () => false }
+  );
+
+  assert.equal(outcome.processStopped, true);
+  assert.equal(outcome.error, null);
+
+  const state = JSON.parse(fs.readFileSync(path.join(resolveStateDir(workspace), "state.json"), "utf8"));
+  assert.equal(state.jobs[0].status, "cancelled");
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(resolveStateDir(workspace), "jobs", `${job.id}.json`), "utf8")).status,
+    "cancelled"
+  );
 });
 
 test("cancelled queued jobs remain stored and are skipped by a late worker", () => {
