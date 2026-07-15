@@ -73,7 +73,7 @@ export function parseArgs(argv, config = {}) {
   return { options, positionals };
 }
 
-export function splitRawArgumentString(raw) {
+function parseRawArgumentString(raw, literalClosingQuoteBackslash) {
   const tokens = [];
   let current = "";
   let quote = null;
@@ -83,12 +83,7 @@ export function splitRawArgumentString(raw) {
 
     if (character === "\\") {
       const nextCharacter = raw[index + 1];
-      const characterAfterQuote = raw[index + 2];
-      const closesQuotedRegion =
-        quote !== null &&
-        nextCharacter === quote &&
-        (characterAfterQuote === undefined || /\s/.test(characterAfterQuote));
-      if (closesQuotedRegion) {
+      if (literalClosingQuoteBackslash && quote !== null && nextCharacter === quote) {
         current += character;
         continue;
       }
@@ -133,5 +128,14 @@ export function splitRawArgumentString(raw) {
     tokens.push(current);
   }
 
-  return tokens;
+  return { tokens, openQuote: quote };
+}
+
+export function splitRawArgumentString(raw) {
+  const escapePreferred = parseRawArgumentString(raw, false);
+  if (escapePreferred.openQuote === null) {
+    return escapePreferred.tokens;
+  }
+
+  return parseRawArgumentString(raw, true).tokens;
 }
