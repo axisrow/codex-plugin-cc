@@ -736,7 +736,7 @@ test("write task output focuses on the Codex result without generic follow-up hi
   assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
 });
 
-test("task --write starts Codex with unrestricted sandbox access", () => {
+test("task --write starts Codex with workspace-write sandbox", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -750,10 +750,10 @@ test("task --write starts Codex with unrestricted sandbox access", () => {
 
   assert.equal(result.status, 0, result.stderr);
   const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(state.lastThreadStart.sandbox, "danger-full-access");
+  assert.equal(state.lastThreadStart.sandbox, "workspace-write");
 });
 
-test("resuming task --write upgrades the thread to unrestricted sandbox access", () => {
+test("resuming task --write upgrades the thread to workspace-write sandbox", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -773,7 +773,7 @@ test("resuming task --write upgrades the thread to unrestricted sandbox access",
 
   assert.equal(result.status, 0, result.stderr);
   const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(state.lastThreadResume.sandbox, "danger-full-access");
+  assert.equal(state.lastThreadResume.sandbox, "workspace-write");
 });
 
 test("task --resume acts like --resume-last without leaking the flag into the prompt", () => {
