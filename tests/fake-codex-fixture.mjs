@@ -347,7 +347,9 @@ rl.on("line", (line) => {
               ? { model: "gpt-5.6-luna", effort: "ultra" }
 	            : null;
 	        const selectedModel = message.params.model || inheritedSelection?.model || "gpt-5.4";
-	        const selectedEffort = message.params.config?.model_reasoning_effort || inheritedSelection?.effort || null;
+	        const selectedEffort = BEHAVIOR === "resolved-effort"
+	          ? "medium"
+	          : message.params.config?.model_reasoning_effort || inheritedSelection?.effort || null;
 	        const modelProvider = BEHAVIOR === "custom-provider" ? "custom" : "openai";
 	        thread.model = selectedModel;
 	        thread.reasoningEffort = selectedEffort;
@@ -516,6 +518,9 @@ rl.on("line", (line) => {
       }
 
 	      case "turn/start": {
+	        if (BEHAVIOR === "turn-start-fails") {
+	          throw new Error("turn/start failed after thread resolution");
+	        }
 	        if (BEHAVIOR === "reject-gpt-5.6" && String(message.params.model || "").startsWith("gpt-5.6-")) {
 	          send({
 	            id: message.id,
