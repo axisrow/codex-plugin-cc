@@ -60,11 +60,36 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
-export async function sendBrokerShutdown(endpoint) {
+export async function sendBrokerShutdown(endpoint, timeoutMs = 2000) {
   return new Promise((resolve) => {
+    let settled = false;
     const socket = connectToEndpoint(endpoint);
     let buffer = "";
     socket.setEncoding("utf8");
+
+    // Bound the wait so a wedged broker (connect accepted, but no data/close/error
+    // ever arrives) can't hang the caller indefinitely — e.g. a runtime-identity
+    // respawn that calls sendBrokerShutdown before teardown would otherwise stall
+    // every subsequent command. Resolve false (treat as "broker not responsive")
+    // and let the caller fall through to its teardown/kill path.
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolve(false);
+    }, timeoutMs);
+
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
@@ -77,13 +102,13 @@ export async function sendBrokerShutdown(endpoint) {
       const line = buffer.slice(0, newlineIndex);
       socket.end();
       try {
-        resolve(!JSON.parse(line.trim()).error);
+        finish(!JSON.parse(line.trim()).error);
       } catch {
-        resolve(false);
+        finish(false);
       }
     });
-    socket.on("error", () => resolve(false));
-    socket.on("close", () => resolve(false));
+    socket.on("error", () => finish(false));
+    socket.on("close", () => finish(false));
   });
 }
 
@@ -165,7 +190,13 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
   }
 
   if (existing) {
-    if (await isBrokerEndpointReady(existing.endpoint)) {
+    // Only trust the recorded pid for tree-kill when the endpoint probe confirmed
+    // the broker was actually live. A stale session whose endpoint is not ready
+    // likely points at a dead broker whose pid the OS may have recycled into an
+    // unrelated process — tree-killing there risks killing the wrong process, so
+    // just drop the files and let any survivor exit on its own.
+    const existingReady = await isBrokerEndpointReady(existing.endpoint);
+    if (existingReady) {
       const brokerStatus = await probeBroker(existing.endpoint, cwd);
       if (brokerStatus === "busy" && options.allowBusyStaleBroker) {
         return existing;
@@ -179,7 +210,10 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
         return null;
       }
     }
-    teardownExistingBroker(cwd, existing, options.killProcess ?? terminateProcessTree);
+    const killProcess = existingReady
+      ? (options.killProcess ?? terminateProcessTree)
+      : (options.killProcess ?? null);
+    teardownExistingBroker(cwd, existing, killProcess);
   }
 
   return null;
