@@ -67,7 +67,7 @@ async function main() {
   }
 
   const { options } = parseArgs(argv, {
-    valueOptions: ["cwd", "pid-file", "endpoint"]
+    valueOptions: ["cwd", "pid-file", "endpoint", "model", "effort"]
   });
 
   if (!options.endpoint) {
@@ -80,7 +80,7 @@ async function main() {
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   writePidFile(pidFile);
 
-  const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+  const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, model: options.model, effort: options.effort });
   let activeRequestSocket = null;
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;

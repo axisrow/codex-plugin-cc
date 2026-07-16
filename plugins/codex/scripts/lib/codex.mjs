@@ -607,10 +607,10 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   }
 }
 
-async function withAppServer(cwd, fn) {
+async function withAppServer(cwd, fn, clientOptions = {}) {
   let client = null;
   try {
-    client = await CodexAppServerClient.connect(cwd);
+    client = await CodexAppServerClient.connect(cwd, clientOptions);
     const result = await fn(client);
     await client.close();
     return result;
@@ -629,7 +629,7 @@ async function withAppServer(cwd, fn) {
       throw error;
     }
 
-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+    const directClient = await CodexAppServerClient.connect(cwd, { ...clientOptions, disableBroker: true });
     try {
       return await fn(directClient);
     } finally {
@@ -1067,7 +1067,7 @@ export async function runAppServerReview(cwd, options = {}) {
       error: turnState.error,
       stderr: cleanCodexStderr(client.stderr)
     };
-  });
+  }, { model: options.model, effort: options.effort });
 }
 
 export async function importExternalAgentSession(cwd, options = {}) {
@@ -1203,7 +1203,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       commandExecutions: turnState.commandExecutions
     };
-  });
+  }, { model: options.model, effort: options.effort });
 }
 
 export async function findLatestTaskThread(cwd) {
