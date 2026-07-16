@@ -13,7 +13,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
+import { ensureBrokerSession, loadReusableBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
@@ -187,14 +187,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    const args = ["app-server"];
-    if (this.options.model) {
-      args.push("-c", `model=${JSON.stringify(String(this.options.model))}`);
-    }
-    if (this.options.effort) {
-      args.push("-c", `model_reasoning_effort=${JSON.stringify(String(this.options.effort))}`);
-    }
-    this.proc = spawn("codex", args, {
+    this.proc = spawn("codex", ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -342,13 +335,17 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
+    const brokerOptions = {
+      env: options.env,
+      allowBusyStaleBroker: options.allowBusyStaleBroker
+    };
     if (!options.disableBroker) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
       if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;
+        brokerEndpoint = (await loadReusableBrokerSession(cwd, brokerOptions))?.endpoint ?? null;
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
-        const brokerSession = await ensureBrokerSession(cwd, { env: options.env, model: options.model, effort: options.effort });
+        const brokerSession = await ensureBrokerSession(cwd, brokerOptions);
         brokerEndpoint = brokerSession?.endpoint ?? null;
       }
     }

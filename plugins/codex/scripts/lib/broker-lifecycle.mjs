@@ -6,12 +6,31 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { withBrokerLock } from "./broker-lock.mjs";
+import { probeBroker } from "./broker-probe.mjs";
+import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
-import { terminateProcessTree } from "./process.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
 const BROKER_STATE_FILE = "broker.json";
+const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
+const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
+
+export function resolveBrokerRuntimeIdentity(cwd, env = process.env) {
+  const codex = binaryAvailable("codex", ["--version"], { cwd, env });
+  return {
+    pluginVersion: PLUGIN_MANIFEST.version ?? "0.0.0",
+    codexVersion: codex.available ? codex.detail : null
+  };
+}
+
+export function isBrokerRuntimeCurrent(session, runtime) {
+  return (
+    session?.runtime?.pluginVersion === runtime.pluginVersion &&
+    session?.runtime?.codexVersion === runtime.codexVersion
+  );
+}
 
 export function createBrokerSessionDir(prefix = "cxc-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -42,50 +61,60 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
 }
 
 export async function sendBrokerShutdown(endpoint, timeoutMs = 2000) {
-  await new Promise((resolve) => {
+  return new Promise((resolve) => {
     let settled = false;
-    const finish = () => {
+    const socket = connectToEndpoint(endpoint);
+    let buffer = "";
+    socket.setEncoding("utf8");
+
+    // Bound the wait so a wedged broker (connect accepted, but no data/close/error
+    // ever arrives) can't hang the caller indefinitely — e.g. a runtime-identity
+    // respawn that calls sendBrokerShutdown before teardown would otherwise stall
+    // every subsequent command. Resolve false (treat as "broker not responsive")
+    // and let the caller fall through to its teardown/kill path.
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolve(false);
+    }, timeoutMs);
+
+    const finish = (value) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
-      resolve();
+      resolve(value);
     };
-    const socket = connectToEndpoint(endpoint);
-    const timer = setTimeout(() => {
-      // A wedged broker may accept the connection but never respond or close.
-      // Bound the wait so the caller can fall back to the process-tree kill.
-      try {
-        socket.destroy();
-      } catch {
-        // Ignore destroy errors on an already-closed socket.
-      }
-      finish();
-    }, timeoutMs);
-    socket.setEncoding("utf8");
+
     socket.on("connect", () => {
       socket.write(`${JSON.stringify({ id: 1, method: "broker/shutdown", params: {} })}\n`);
     });
-    socket.on("data", () => {
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex);
       socket.end();
-      finish();
+      try {
+        finish(!JSON.parse(line.trim()).error);
+      } catch {
+        finish(false);
+      }
     });
-    socket.on("error", finish);
-    socket.on("close", finish);
+    socket.on("error", () => finish(false));
+    socket.on("close", () => finish(false));
   });
 }
 
-export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, model, effort, env = process.env }) {
+export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, env = process.env }) {
   const logFd = fs.openSync(logFile, "a");
-  const args = [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile];
-  if (model) {
-    args.push("--model", String(model));
-  }
-  if (effort) {
-    args.push("--effort", String(effort));
-  }
-  const child = spawn(process.execPath, args, {
+  const child = spawn(process.execPath, [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile], {
     cwd,
     env,
     detached: true,
@@ -137,96 +166,114 @@ async function isBrokerEndpointReady(endpoint) {
   }
 }
 
-export async function ensureBrokerSession(cwd, options = {}) {
+function teardownExistingBroker(cwd, existing, killProcess) {
+  teardownBrokerSession({
+    endpoint: existing.endpoint ?? null,
+    pidFile: existing.pidFile ?? null,
+    logFile: existing.logFile ?? null,
+    sessionDir: existing.sessionDir ?? null,
+    pid: existing.pid ?? null,
+    killProcess
+  });
+  clearBrokerSession(cwd);
+}
+
+async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
-  const existingReady = existing && (await isBrokerEndpointReady(existing.endpoint));
-  if (existing && existingReady) {
-    // Reuse the warm broker only when it was spawned with the same model/effort
-    // override the caller is requesting now. model/effort are baked in at spawn
-    // (they reach `codex app-server` via `-c` argv), so a differing override
-    // cannot take effect on an already-running broker — respawn instead.
-    const sameModel = (existing.model ?? null) === (options.model ?? null);
-    const sameEffort = (existing.effort ?? null) === (options.effort ?? null);
-    if (sameModel && sameEffort) {
-      return existing;
-    }
+  const runtime = resolveBrokerRuntimeIdentity(cwd, options.env);
+  if (
+    existing &&
+    isBrokerRuntimeCurrent(existing, runtime) &&
+    (await isBrokerEndpointReady(existing.endpoint))
+  ) {
+    return existing;
   }
 
   if (existing) {
-    // The existing broker may still be live (this path now also runs on the
-    // override-differ respawn branch above). Ask it to shut down gracefully so
-    // it closes its codex app-server child, then tear down its files and
-    // belt-and-suspenders tree-kill in case the RPC doesn't land. Without this
-    // the detached+unref'd broker process (and its app-server child) would be
-    // orphaned indefinitely — only its socket file got unlinked before.
-    if (existing.endpoint) {
-      try {
-        await sendBrokerShutdown(existing.endpoint);
-      } catch {
-        // Broker may already be gone; the tree-kill below is the fallback.
+    // Only trust the recorded pid for tree-kill when the endpoint probe confirmed
+    // the broker was actually live. A stale session whose endpoint is not ready
+    // likely points at a dead broker whose pid the OS may have recycled into an
+    // unrelated process — tree-killing there risks killing the wrong process, so
+    // just drop the files and let any survivor exit on its own.
+    const existingReady = await isBrokerEndpointReady(existing.endpoint);
+    if (existingReady) {
+      const brokerStatus = await probeBroker(existing.endpoint, cwd);
+      if (brokerStatus === "busy" && options.allowBusyStaleBroker) {
+        return existing;
+      }
+      if (brokerStatus !== "idle") {
+        options.deferBrokerReplacement = true;
+        return null;
+      }
+      if (!(await sendBrokerShutdown(existing.endpoint))) {
+        options.deferBrokerReplacement = true;
+        return null;
       }
     }
-    // Only tree-kill by pid when we confirmed the broker endpoint was live, so
-    // the pid still belongs to our broker. A stale session whose endpoint is
-    // not ready likely points at a dead broker whose pid the OS may have
-    // reused for an unrelated process — in that case just drop the files and
-    // let any survivor exit on its own.
-    const killProcess = existingReady ? (options.killProcess ?? terminateProcessTree) : (options.killProcess ?? null);
-    teardownBrokerSession({
-      endpoint: existing.endpoint ?? null,
-      pidFile: existing.pidFile ?? null,
-      logFile: existing.logFile ?? null,
-      sessionDir: existing.sessionDir ?? null,
-      pid: existing.pid ?? null,
-      killProcess
-    });
-    clearBrokerSession(cwd);
+    const killProcess = existingReady
+      ? (options.killProcess ?? terminateProcessTree)
+      : (options.killProcess ?? null);
+    teardownExistingBroker(cwd, existing, killProcess);
   }
 
-  const sessionDir = createBrokerSessionDir();
-  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
-  const endpoint = endpointFactory(sessionDir, options.platform);
-  const pidFile = path.join(sessionDir, "broker.pid");
-  const logFile = path.join(sessionDir, "broker.log");
-  const scriptPath =
-    options.scriptPath ??
-    fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
+  return null;
+}
 
-  const child = spawnBrokerProcess({
-    scriptPath,
-    cwd,
-    endpoint,
-    pidFile,
-    logFile,
-    model: options.model,
-    effort: options.effort,
-    env: options.env ?? process.env
-  });
+export async function loadReusableBrokerSession(cwd, options = {}) {
+  return withBrokerLock(cwd, options, () => loadReusableBrokerSessionUnlocked(cwd, options));
+}
 
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
-  if (!ready) {
-    teardownBrokerSession({
+export async function ensureBrokerSession(cwd, options = {}) {
+  return withBrokerLock(cwd, options, async () => {
+    const existing = await loadReusableBrokerSessionUnlocked(cwd, options);
+    if (existing || options.deferBrokerReplacement) {
+      return existing;
+    }
+
+    const runtime = resolveBrokerRuntimeIdentity(cwd, options.env);
+
+    const sessionDir = createBrokerSessionDir();
+    const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
+    const endpoint = endpointFactory(sessionDir, options.platform);
+    const pidFile = path.join(sessionDir, "broker.pid");
+    const logFile = path.join(sessionDir, "broker.log");
+    const scriptPath =
+      options.scriptPath ??
+      fileURLToPath(new URL("../app-server-broker.mjs", import.meta.url));
+
+    const child = spawnBrokerProcess({
+      scriptPath,
+      cwd,
+      endpoint,
+      pidFile,
+      logFile,
+      env: options.env ?? process.env
+    });
+
+    const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+    if (!ready) {
+      teardownBrokerSession({
+        endpoint,
+        pidFile,
+        logFile,
+        sessionDir,
+        pid: child.pid ?? null,
+        killProcess: options.killProcess ?? terminateProcessTree
+      });
+      return null;
+    }
+
+    const session = {
       endpoint,
       pidFile,
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
-    });
-    return null;
-  }
-
-  const session = {
-    endpoint,
-    pidFile,
-    logFile,
-    sessionDir,
-    pid: child.pid ?? null,
-    model: options.model ?? null,
-    effort: options.effort ?? null
-  };
-  saveBrokerSession(cwd, session);
-  return session;
+      runtime
+    };
+    saveBrokerSession(cwd, session);
+    return session;
+  });
 }
 
 export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
