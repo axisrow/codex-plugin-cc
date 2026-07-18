@@ -267,13 +267,13 @@ function buildNativeReviewTarget(target) {
   return null;
 }
 
-function validateNativeReviewRequest(target, focusText) {
-  if (focusText.trim()) {
-    throw new Error(
-      `\`/codex:review\` now maps directly to the built-in reviewer and does not support custom focus text. Retry with \`/codex:adversarial-review ${focusText.trim()}\` for focused review instructions.`
-    );
-  }
-
+function validateNativeReviewRequest(target, _focusText) {
+  // Parity with /codex:adversarial-review: positional focus text no longer
+  // aborts the native review. The native reviewer (review/start) does not
+  // consume focus text, so leftover positional words are silently ignored
+  // rather than rejecting the invocation. This keeps `/codex:review --model sol`
+  // usable when a host forwards residual positional text alongside flags,
+  // and removes an interface-parity gap with /codex:adversarial-review (#522).
   const nativeTarget = buildNativeReviewTarget(target);
   if (!nativeTarget) {
     throw new Error("This `/codex:review` target is not supported by the built-in reviewer. Retry with `/codex:adversarial-review` for custom targeting.");
