@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 
 import { parseArgs } from "./lib/args.mjs";
-import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
-import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+import { CodexAppServerClient } from "./lib/app-server.mjs";
+import { createBrokerController } from "./lib/broker-controller.mjs";
 
-const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+// When set (by the smoke-test harness), the CLI mirrors `ready`/`stopped` over
+// its IPC channel so the test has a causal readiness barrier instead of socket
+// probing. Production leaves this unset.
+const BROKER_IPC_ENV = "CODEX_COMPANION_BROKER_IPC";
 
 function resolveIdleTimeoutMs(env = process.env) {
   const rawValue = env[BROKER_IDLE_TIMEOUT_ENV];
@@ -24,40 +25,6 @@ function resolveIdleTimeoutMs(env = process.env) {
     return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
   }
   return Math.floor(parsed);
-}
-
-function buildStreamThreadIds(method, params, result) {
-  const threadIds = new Set();
-  if (params?.threadId) {
-    threadIds.add(params.threadId);
-  }
-  if (method === "review/start" && result?.reviewThreadId) {
-    threadIds.add(result.reviewThreadId);
-  }
-  return threadIds;
-}
-
-function buildJsonRpcError(code, message, data) {
-  return data === undefined ? { code, message } : { code, message, data };
-}
-
-function send(socket, message) {
-  if (socket.destroyed) {
-    return;
-  }
-  socket.write(`${JSON.stringify(message)}\n`);
-}
-
-function isInterruptRequest(message) {
-  return message?.method === "turn/interrupt";
-}
-
-function writePidFile(pidFile) {
-  if (!pidFile) {
-    return;
-  }
-  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
 }
 
 async function main() {
@@ -75,271 +42,36 @@ async function main() {
   }
 
   const cwd = options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
-  const endpoint = String(options.endpoint);
-  const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
-  writePidFile(pidFile);
+  const ipcEnabled = process.env[BROKER_IPC_ENV] === "1";
 
-  const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true, model: options.model, effort: options.effort });
-  let activeRequestSocket = null;
-  let activeStreamSocket = null;
-  let activeStreamThreadIds = null;
-  const sockets = new Set();
-  const idleTimeoutMs = resolveIdleTimeoutMs();
-  let idleTimer = null;
-  let shuttingDown = false;
-  let terminating = false;
-
-  function cancelIdleShutdown() {
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  }
-
-  function clearSocketOwnership(socket) {
-    if (activeRequestSocket === socket) {
-      activeRequestSocket = null;
-    }
-    if (activeStreamSocket === socket) {
-      activeStreamSocket = null;
-      activeStreamThreadIds = null;
-    }
-  }
-
-  function routeNotification(message) {
-    const target = activeRequestSocket ?? activeStreamSocket;
-    if (!target) {
-      return;
-    }
-    send(target, message);
-    if (message.method === "turn/completed" && activeStreamSocket === target) {
-      const threadId = message.params?.threadId ?? null;
-      if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
-        activeStreamSocket = null;
-        activeStreamThreadIds = null;
-        if (activeRequestSocket === target) {
-          activeRequestSocket = null;
-        }
-      }
-    }
-  }
-
-  async function shutdown(server) {
-    if (shuttingDown) {
-      return;
-    }
-    shuttingDown = true;
-    cancelIdleShutdown();
-    // Stop accepting connections before awaiting child cleanup. Otherwise a
-    // reconnect can slip into the async shutdown window and inherit a closing
-    // app-server client.
-    const serverClosed = new Promise((resolve) => server.close(resolve));
-    for (const socket of sockets) {
-      socket.end();
-    }
-    await appClient.close().catch(() => {});
-    // Bound the wait so a peer that never closes its socket (e.g. a wedged
-    // client) cannot keep shutdown — and therefore the broker's exit — hung
-    // indefinitely. Force-destroy any lingering sockets after a short grace.
-    await Promise.race([
-      serverClosed,
-      new Promise((resolve) => setTimeout(resolve, 1000))
-    ]).finally(() => {
-      for (const socket of sockets) {
-        socket.destroy();
-      }
-    });
-    if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
-      fs.unlinkSync(listenTarget.path);
-    }
-    if (pidFile && fs.existsSync(pidFile)) {
-      fs.unlinkSync(pidFile);
-    }
-  }
-
-  function scheduleIdleShutdown(server) {
-    cancelIdleShutdown();
-    if (shuttingDown || idleTimeoutMs === 0 || sockets.size > 0 || activeRequestSocket || activeStreamSocket) {
-      return;
-    }
-
-    idleTimer = setTimeout(async () => {
-      idleTimer = null;
-      if (sockets.size > 0 || activeRequestSocket || activeStreamSocket) {
-        return;
-      }
-      await shutdown(server);
-      process.exit(0);
-    }, idleTimeoutMs);
-  }
-
-  appClient.setNotificationHandler(routeNotification);
-
-  const server = net.createServer((socket) => {
-    if (shuttingDown) {
-      // An already-accepted connection event can be delivered after
-      // server.close(). Reject it decisively and absorb a simultaneous reset.
-      socket.on("error", () => {});
-      socket.destroy();
-      return;
-    }
-    cancelIdleShutdown();
-    sockets.add(socket);
-    socket.setEncoding("utf8");
-    let buffer = "";
-
-    socket.on("data", async (chunk) => {
-      buffer += chunk;
-      let newlineIndex = buffer.indexOf("\n");
-      while (newlineIndex !== -1) {
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        newlineIndex = buffer.indexOf("\n");
-
-        if (!line.trim()) {
-          continue;
-        }
-
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch (error) {
-          send(socket, {
-            id: null,
-            error: buildJsonRpcError(-32700, `Invalid JSON: ${error.message}`)
-          });
-          continue;
-        }
-
-        if (message.id !== undefined && message.method === "initialize") {
-          send(socket, {
-            id: message.id,
-            result: {
-              userAgent: "codex-companion-broker"
-            }
-          });
-          continue;
-        }
-
-        if (message.method === "initialized" && message.id === undefined) {
-          continue;
-        }
-
-        if (message.id !== undefined && message.method === "broker/shutdown") {
-          if (activeRequestSocket || activeStreamSocket) {
-            send(socket, {
-              id: message.id,
-              error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Codex broker is busy.")
-            });
-            continue;
-          }
-          send(socket, { id: message.id, result: {} });
-          await shutdown(server);
-          process.exit(0);
-        }
-
-        if (message.id === undefined) {
-          continue;
-        }
-
-        const allowInterruptDuringActiveStream =
-          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
-
-        if (
-          ((activeRequestSocket && activeRequestSocket !== socket) || (activeStreamSocket && activeStreamSocket !== socket)) &&
-          !allowInterruptDuringActiveStream
-        ) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Codex broker is busy.")
-          });
-          continue;
-        }
-
-        if (allowInterruptDuringActiveStream) {
-          try {
-            const result = await appClient.request(message.method, message.params ?? {});
-            send(socket, { id: message.id, result });
-          } catch (error) {
-            send(socket, {
-              id: message.id,
-              error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
-            });
-          }
-          continue;
-        }
-
-        const isStreaming = STREAMING_METHODS.has(message.method);
-        activeRequestSocket = socket;
-
-        try {
-          const result = await appClient.request(message.method, message.params ?? {});
-          send(socket, { id: message.id, result });
-          if (isStreaming) {
-            activeStreamSocket = socket;
-            activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
-          }
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-        } catch (error) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
-          });
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-          if (activeStreamSocket === socket && !isStreaming) {
-            activeStreamSocket = null;
-          }
-        }
-      }
-    });
-
-    socket.on("close", () => {
-      sockets.delete(socket);
-      clearSocketOwnership(socket);
-      scheduleIdleShutdown(server);
-    });
-
-    socket.on("error", () => {
-      sockets.delete(socket);
-      clearSocketOwnership(socket);
-      scheduleIdleShutdown(server);
-    });
+  const broker = await createBrokerController({
+    endpoint: String(options.endpoint),
+    pidFile,
+    idleTimeoutMs: resolveIdleTimeoutMs(),
+    pid: process.pid,
+    appClientFactory: () =>
+      CodexAppServerClient.connect(cwd, {
+        disableBroker: true,
+        model: options.model,
+        effort: options.effort
+      })
   });
 
-  // The broker proxies every request to its single app-server child. If that
-  // child exits, appClient can no longer serve: request() writes to a closed
-  // stdin and its promise never resolves, so a caller hangs forever (a
-  // submitted turn/review sits at "starting" and is never answered). The broker
-  // would otherwise stay up as a zombie because its listening socket still
-  // accepts connections, so ensureBrokerSession() keeps reusing it. Terminate
-  // when the child exits so the stale socket/pid-file are removed and the next
-  // connect spawns a fresh, working broker.
-  appClient.exitPromise.then(() => {
-    if (shuttingDown || terminating) {
-      return;
-    }
-    terminating = true;
-    shutdown(server).finally(() => process.exit(1));
-  });
+  if (ipcEnabled && typeof process.send === "function") {
+    broker.ready.then(() => process.send({ type: "ready" }));
+  }
 
-  process.on("SIGTERM", async () => {
-    await shutdown(server);
-    process.exit(0);
-  });
+  process.on("SIGTERM", () => broker.signalShutdown("signal"));
+  process.on("SIGINT", () => broker.signalShutdown("signal"));
 
-  process.on("SIGINT", async () => {
-    await shutdown(server);
-    process.exit(0);
-  });
+  const result = await broker.stopped;
 
-  server.listen(listenTarget.path, () => {
-    scheduleIdleShutdown(server);
-  });
+  if (ipcEnabled && typeof process.send === "function") {
+    process.send({ type: "stopped", reason: result.reason, exitCode: result.exitCode });
+  }
+
+  process.exit(result.exitCode);
 }
 
 main().catch((error) => {
