@@ -1,126 +1,103 @@
-import fs from "node:fs";
-import net from "node:net";
-import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
-import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { makeTempDir } from "./helpers.mjs";
-import { sendBrokerShutdown, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { spawnInProcessBroker, FakeAppClient } from "./broker-controller-helpers.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const BROKER_SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "app-server-broker.mjs");
-const IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
+test("broker exits via idle timer when no client is connected", async () => {
+  const { broker, clock } = await spawnInProcessBroker({
+    appClient: new FakeAppClient(),
+    idleTimeoutMs: 500
+  });
+  await broker.ready;
 
-function spawnTestBroker({ idleTimeoutMs }) {
-  const workspace = makeTempDir();
-  const binDir = makeTempDir();
-  const sessionDir = makeTempDir("codex-plugin-broker-");
-  const socketPath = path.join(sessionDir, "broker.sock");
-  const endpoint = `unix:${socketPath}`;
-  const pidFile = path.join(sessionDir, "broker.pid");
-  installFakeCodex(binDir);
-
-  const child = spawn(
-    process.execPath,
-    [BROKER_SCRIPT, "serve", "--endpoint", endpoint, "--cwd", workspace, "--pid-file", pidFile],
-    {
-      cwd: workspace,
-      env: {
-        ...buildEnv(binDir),
-        [IDLE_TIMEOUT_ENV]: String(idleTimeoutMs)
-      },
-      stdio: ["ignore", "pipe", "pipe"]
-    }
-  );
-
-  return { child, endpoint, pidFile, socketPath };
-}
-
-async function waitForExit(child, timeoutMs = 3000) {
-  if (child.exitCode != null || child.signalCode != null) {
-    return;
-  }
-  await Promise.race([
-    once(child, "exit"),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for broker to exit.")), timeoutMs))
+  // idle is armed on listen when sockets are empty.
+  const armed = await Promise.race([
+    broker.idleArmed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 50))
   ]);
-}
+  assert.equal(armed, true);
 
-function terminateBroker(child) {
-  if (child.exitCode == null && child.signalCode == null) {
-    child.kill("SIGTERM");
-  }
-}
-
-test("broker exits and removes runtime files after its last client stays disconnected", async (t) => {
-  const broker = spawnTestBroker({ idleTimeoutMs: 150 });
-  t.after(() => terminateBroker(broker.child));
-
-  assert.equal(await waitForBrokerEndpoint(broker.endpoint), true);
-  await waitForExit(broker.child);
-
-  assert.equal(broker.child.exitCode, 0);
-  assert.equal(fs.existsSync(broker.socketPath), false);
-  assert.equal(fs.existsSync(broker.pidFile), false);
+  clock.advanceBy(500);
+  const result = await broker.stopped;
+  assert.equal(result.reason, "idle");
+  assert.equal(result.exitCode, 0);
 });
 
-test("broker idle shutdown waits until a connected client disconnects", async (t) => {
-  const broker = spawnTestBroker({ idleTimeoutMs: 150 });
-  t.after(() => terminateBroker(broker.child));
+test("broker idle timer is cancelled while a client is connected, then fires on disconnect", async () => {
+  const { broker, clock, connectClient } = await spawnInProcessBroker({
+    appClient: new FakeAppClient(),
+    idleTimeoutMs: 500
+  });
+  await broker.ready;
 
-  assert.equal(await waitForBrokerEndpoint(broker.endpoint), true);
-  const socket = net.createConnection({ path: broker.socketPath });
-  await once(socket, "connect");
+  const client = await connectClient();
+  // Far past the idle window while connected — must NOT stop.
+  clock.advanceBy(10_000);
+  const winner = await Promise.race([
+    broker.stopped.then(() => "stopped"),
+    new Promise((resolve) => setTimeout(() => resolve("still-running"), 50))
+  ]);
+  assert.equal(winner, "still-running");
 
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.equal(broker.child.exitCode, null);
-  assert.equal(broker.child.signalCode, null);
-
-  socket.end();
-  await once(socket, "close");
-  await waitForExit(broker.child);
-  assert.equal(broker.child.exitCode, 0);
+  client.end();
+  await broker.clientClosed;
+  // Idle re-arms after the last socket closes; advancing fires it.
+  clock.advanceBy(500);
+  const result = await broker.stopped;
+  assert.equal(result.reason, "idle");
+  assert.equal(result.exitCode, 0);
 });
 
-test("broker idle timeout can be disabled", async (t) => {
-  const broker = spawnTestBroker({ idleTimeoutMs: 0 });
-  t.after(() => terminateBroker(broker.child));
+test("idle timeout disabled (idleTimeoutMs=0) never arms idle", async () => {
+  const { broker } = await spawnInProcessBroker({
+    appClient: new FakeAppClient(),
+    idleTimeoutMs: 0
+  });
+  await broker.ready;
 
-  assert.equal(await waitForBrokerEndpoint(broker.endpoint), true);
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.equal(broker.child.exitCode, null);
-  assert.equal(broker.child.signalCode, null);
+  const armed = await Promise.race([
+    broker.idleArmed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 50))
+  ]);
+  assert.equal(armed, false);
 
-  terminateBroker(broker.child);
-  await waitForExit(broker.child);
+  broker.signalShutdown("signal");
+  const result = await broker.stopped;
+  assert.equal(result.exitCode, 0);
 });
 
-test("broker shuts down cleanly while new clients race to connect", async (t) => {
-  const broker = spawnTestBroker({ idleTimeoutMs: 0 });
-  t.after(() => terminateBroker(broker.child));
+test("broker/shutdown RPC returns ok and stops cleanly", async () => {
+  const { broker, sendRpc } = await spawnInProcessBroker({
+    appClient: new FakeAppClient(),
+    idleTimeoutMs: 0
+  });
+  await broker.ready;
 
-  assert.equal(await waitForBrokerEndpoint(broker.endpoint), true);
-  const reconnects = Array.from(
-    { length: 50 },
-    () =>
-      new Promise((resolve) => {
-        const socket = net.createConnection({ path: broker.socketPath });
-        const timer = setTimeout(() => socket.destroy(), 1000);
-        const finish = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        socket.on("connect", () => socket.end());
-        socket.on("error", finish);
-        socket.on("close", finish);
-      })
-  );
+  const reply = await sendRpc({ id: 1, method: "broker/shutdown", params: {} });
+  assert.deepEqual(reply, { id: 1, result: {} });
 
-  await Promise.all([sendBrokerShutdown(broker.endpoint), ...reconnects]);
-  await waitForExit(broker.child);
-  assert.equal(broker.child.exitCode, 0);
+  const result = await broker.stopped;
+  assert.equal(result.reason, "broker/shutdown");
+  assert.equal(result.exitCode, 0);
+});
+
+test("broker/shutdown RPC is rejected while a request is in flight", async () => {
+  const appClient = new FakeAppClient();
+  // turn/start never resolves → the socket stays the active request owner.
+  appClient.on("turn/start", () => new Promise(() => {}));
+  const { broker, sendRpc } = await spawnInProcessBroker({
+    appClient,
+    idleTimeoutMs: 0
+  });
+  await broker.ready;
+
+  // Drive the controller into an active request (fire and forget).
+  sendRpc({ id: 1, method: "turn/start", params: {} });
+  await broker.clientAccepted;
+
+  const reply = await sendRpc({ id: 2, method: "broker/shutdown", params: {} });
+  assert.equal(reply.error?.code, -32001);
+
+  broker.signalShutdown("signal");
+  await broker.stopped;
 });
