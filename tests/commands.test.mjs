@@ -39,7 +39,8 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /Claude Code's `Bash\(..., run_in_background: true\)` is what actually detaches the run/i);
   assert.match(source, /When in doubt, run the review/i);
   assert.match(source, /\(Recommended\)/);
-  assert.match(source, /does not support staged-only review, unstaged-only review, or extra focus text/i);
+  assert.match(source, /does not support staged-only review or unstaged-only review/i);
+  assert.match(source, /Positional focus text is ignored by the native reviewer/i);
   assert.match(source, /Preserve the user's INTENT exactly/i);
   assert.match(source, /rewrite a natural-language model or effort mention into the corresponding/i);
   assert.match(source, /Model\/effort recognition \(natural-language phrases\):/i);
