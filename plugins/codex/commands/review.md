@@ -32,13 +32,19 @@ Execution mode rules:
   - `Run in background`
 
 Argument handling:
-- Preserve the user's arguments exactly.
+- Preserve the user's INTENT exactly. You MAY rewrite a natural-language model or effort mention into the corresponding `--model` / `--effort` flag so the strict companion parser accepts it; do not otherwise change `--wait`, `--background`, `--base`, or `--scope`.
 - `--model` and `--effort` select the Codex runtime for the review and are not focus text.
 - Do not strip `--wait` or `--background` yourself.
-- Do not add extra review instructions or rewrite the user's intent.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - `/codex:review` is native-review only. It does not support staged-only review, unstaged-only review, or extra focus text.
 - If the user needs custom review instructions or more adversarial framing, they should use `/codex:adversarial-review`.
+
+Model/effort recognition (natural-language phrases):
+- The user may write the model or effort in ANY natural language, including transliteration, typos, and non-Latin scripts (e.g. Cyrillic, Thai, Japanese). They will often omit the `--` flags entirely (e.g. "review model sol effort xhigh" or its equivalent in another language).
+- Canonical model aliases (the only values `--model` accepts as short names): `spark` → gpt-5.3-codex-spark, `sol` → gpt-5.6-sol, `terra` → gpt-5.6-terra, `luna` → gpt-5.6-luna. A concrete model id (e.g. `gpt-5.4-mini`) is passed through unchanged.
+- Canonical reasoning efforts (the only values `--effort` accepts): `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.
+- Before forwarding `$ARGUMENTS` to the companion, scan the raw arguments for model/effort intent in any language, map it to the canonical value above, and emit the result as `--model <canonical>` / `--effort <canonical>`. Use your judgment for language variants, transliteration, and typos — do not try to enumerate them. (Examples only, not exhaustive: a user writing "сол" or "sol" means `--model sol`; "ххай", "хай", "extra high", or "very high" means `--effort xhigh`.)
+- `/codex:review` does not accept focus text. If, after extracting every recognized model/effort mention, the phrase is fully consumed, drop those words and forward only the resulting `--model`/`--effort` flags. If any non-flag words remain that you cannot map to model or effort, do NOT forward them (the companion will reject them). Instead use `AskUserQuestion` once with a suggested corrected command, e.g. `node ... review --model sol --effort xhigh`, and ask the user to confirm or clarify.
 
 Foreground flow:
 - Run:
