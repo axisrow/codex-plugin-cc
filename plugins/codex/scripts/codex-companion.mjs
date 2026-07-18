@@ -268,7 +268,7 @@ function buildNativeReviewTarget(target) {
   return null;
 }
 
-function validateNativeReviewRequest(target, _focusText) {
+function validateNativeReviewRequest(target) {
   // Parity with /codex:adversarial-review: positional focus text no longer
   // aborts the native review. The native reviewer (review/start) does not
   // consume focus text, so leftover positional words are silently ignored
@@ -363,10 +363,9 @@ async function executeReviewRun(request) {
     base: request.base,
     scope: request.scope
   });
-  const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
   if (reviewName === "Review") {
-    const reviewTarget = validateNativeReviewRequest(target, focusText);
+    const reviewTarget = validateNativeReviewRequest(target);
     const result = await runAppServerReview(request.cwd, {
       target: reviewTarget,
       model: request.model,
@@ -407,6 +406,7 @@ async function executeReviewRun(request) {
   }
 
   const context = collectReviewContext(request.cwd, target);
+  const focusText = request.focusText?.trim() ?? "";
   const prompt = buildAdversarialReviewPrompt(context, focusText);
   const result = await runAppServerTurn(context.repoRoot, {
     prompt,
