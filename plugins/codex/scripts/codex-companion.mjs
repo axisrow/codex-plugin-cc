@@ -726,7 +726,7 @@ async function handleReviewCommand(argv, config) {
     scope: options.scope
   });
 
-  config.validateRequest?.(target, focusText);
+  config.validateRequest?.(target);
   const metadata = buildReviewJobMetadata(config.reviewName, target);
   const job = createCompanionJob({
     prefix: "review",
