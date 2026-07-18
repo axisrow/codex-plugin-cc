@@ -84,7 +84,7 @@ class AppServerClientBase {
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
   request(method, params) {
-    if (this.closed) {
+    if (this.closed || this.exitResolved) {
       throw new Error("codex app-server client is closed.");
     }
 
@@ -98,7 +98,7 @@ class AppServerClientBase {
   }
 
   notify(method, params = {}) {
-    if (this.closed) {
+    if (this.closed || this.exitResolved) {
       return;
     }
     this.sendMessage({ method, params });

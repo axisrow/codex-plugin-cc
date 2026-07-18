@@ -88,6 +88,7 @@ async function main() {
   const idleTimeoutMs = resolveIdleTimeoutMs();
   let idleTimer = null;
   let shuttingDown = false;
+  let terminating = false;
 
   function cancelIdleShutdown() {
     if (idleTimer) {
@@ -138,7 +139,17 @@ async function main() {
       socket.end();
     }
     await appClient.close().catch(() => {});
-    await serverClosed;
+    // Bound the wait so a peer that never closes its socket (e.g. a wedged
+    // client) cannot keep shutdown — and therefore the broker's exit — hung
+    // indefinitely. Force-destroy any lingering sockets after a short grace.
+    await Promise.race([
+      serverClosed,
+      new Promise((resolve) => setTimeout(resolve, 1000))
+    ]).finally(() => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+    });
     if (listenTarget.kind === "unix" && fs.existsSync(listenTarget.path)) {
       fs.unlinkSync(listenTarget.path);
     }
@@ -298,6 +309,22 @@ async function main() {
       clearSocketOwnership(socket);
       scheduleIdleShutdown(server);
     });
+  });
+
+  // The broker proxies every request to its single app-server child. If that
+  // child exits, appClient can no longer serve: request() writes to a closed
+  // stdin and its promise never resolves, so a caller hangs forever (a
+  // submitted turn/review sits at "starting" and is never answered). The broker
+  // would otherwise stay up as a zombie because its listening socket still
+  // accepts connections, so ensureBrokerSession() keeps reusing it. Terminate
+  // when the child exits so the stale socket/pid-file are removed and the next
+  // connect spawns a fresh, working broker.
+  appClient.exitPromise.then(() => {
+    if (shuttingDown || terminating) {
+      return;
+    }
+    terminating = true;
+    shutdown(server).finally(() => process.exit(1));
   });
 
   process.on("SIGTERM", async () => {

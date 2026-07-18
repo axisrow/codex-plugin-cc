@@ -301,6 +301,15 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 bootState.lastAppServerSpawnArgs = args;
 saveState(bootState);
 
+// app-server-self-exit: simulate the app-server child dying shortly after
+// boot. The broker must observe this (via appClient.exitPromise) and terminate
+// itself, removing its socket + pid file — instead of staying up as a zombie
+// that accepts connections but never answers. The short delay lets the
+// initialize handshake flush before the process exits.
+if (BEHAVIOR === "app-server-self-exit") {
+  setTimeout(() => process.exit(1), 50);
+}
+
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   if (!line.trim()) {
