@@ -301,14 +301,12 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 bootState.lastAppServerSpawnArgs = args;
 saveState(bootState);
 
-// app-server-self-exit: simulate the app-server child dying shortly after
-// boot. The broker must observe this (via appClient.exitPromise) and terminate
-// itself, removing its socket + pid file — instead of staying up as a zombie
-// that accepts connections but never answers. The short delay lets the
-// initialize handshake flush before the process exits.
-if (BEHAVIOR === "app-server-self-exit") {
-  setTimeout(() => process.exit(1), 50);
-}
+// app-server-self-exit: simulate the app-server child dying after the
+// initialize handshake. Death is ACK-based — the fake exits on the
+// initialized notification (after the initialize reply flushed), NOT on a
+// boot-relative timer. A boot timer raced the broker listen/exitPromise-arm
+// step and flaked under load; the ACK guarantees ordering.
+
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -328,6 +326,9 @@ rl.on("line", (line) => {
         break;
 
       case "initialized":
+        if (BEHAVIOR === "app-server-self-exit") {
+          process.exit(1);
+        }
         break;
 
       case "account/read":
