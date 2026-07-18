@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -42,8 +42,8 @@ Operating rules:
 - Return the Codex companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
-- Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.
-- Leave the model unset unless the user explicitly asks for one. If they ask for `spark`, map it to `gpt-5.3-codex-spark`.
+- Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort, in any language (including transliteration, typos, and non-Latin scripts such as Cyrillic, Thai, or Japanese). Canonical efforts: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Map approximate wording to the closest canonical value using your judgment. (Examples only, not exhaustive: "ххай", "хай", "extra high", or "very high" → `xhigh`; "макс" or "maximum" → `max`.)
+- Leave the model unset unless the user explicitly asks for one, in any language. Canonical model aliases: `spark` → gpt-5.3-codex-spark, `sol` → gpt-5.6-sol, `terra` → gpt-5.6-terra, `luna` → gpt-5.6-luna. If they ask for `spark`, map it to `gpt-5.3-codex-spark`. If they ask for `sol`/`terra`/`luna`, map to `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna` respectively. A concrete model id (e.g. `gpt-5.4-mini`) is passed through unchanged. (Examples only, not exhaustive: a user writing "сол" or "sol" means `--model sol`.)
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
 - If the helper reports that Codex is missing or unauthenticated, stop and tell the user to run `/codex:setup`.
 - If the user did not supply a request, ask what Codex should investigate or fix.

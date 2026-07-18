@@ -1,6 +1,6 @@
 ---
 description: Run a Codex review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [focus ...]'
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -35,7 +35,7 @@ Execution mode rules:
   - `Run in background`
 
 Argument handling:
-- Preserve the user's arguments exactly.
+- Preserve the user's INTENT exactly. You MAY rewrite a natural-language model or effort mention into the corresponding `--model` / `--effort` flag so the strict companion parser accepts it; do not otherwise change `--wait`, `--background`, `--base`, `--scope`, or the user's focus text.
 - `--model` and `--effort` select the Codex runtime and must not become part of the focus text.
 - Do not strip `--wait` or `--background` yourself.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
@@ -44,6 +44,13 @@ Argument handling:
 - It supports working-tree review, branch review, and `--base <ref>`.
 - It does not support `--scope staged` or `--scope unstaged`.
 - Unlike `/codex:review`, it can still take extra focus text after the flags.
+
+Model/effort recognition (natural-language phrases):
+- The user may write the model or effort in ANY natural language, including transliteration, typos, and non-Latin scripts (e.g. Cyrillic, Thai, Japanese). They will often omit the `--` flags entirely (e.g. "challenge the caching design with model sol effort xhigh" or its equivalent in another language).
+- Canonical model aliases (the only values `--model` accepts as short names): `spark` → gpt-5.3-codex-spark, `sol` → gpt-5.6-sol, `terra` → gpt-5.6-terra, `luna` → gpt-5.6-luna. A concrete model id (e.g. `gpt-5.4-mini`) is passed through unchanged.
+- Canonical reasoning efforts (the only values `--effort` accepts): `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.
+- Before forwarding `$ARGUMENTS` to the companion, scan the raw arguments for model/effort intent in any language, map it to the canonical value above, and emit the result as `--model <canonical>` / `--effort <canonical>`. Use your judgment for language variants, transliteration, and typos — do not try to enumerate them. (Examples only, not exhaustive: a user writing "сол" or "sol" means `--model sol`; "ххай", "хай", "extra high", or "very high" means `--effort xhigh`.)
+- Unlike `/codex:review`, this command accepts focus text. Strip ONLY the recognized model/effort words from the phrase; keep everything else as focus text and forward `--model <canonical> --effort <canonical> <remaining focus text>`.
 
 Foreground flow:
 - Run:

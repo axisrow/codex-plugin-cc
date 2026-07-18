@@ -22,7 +22,7 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /```typescript/);
   assert.match(source, /review "\$ARGUMENTS"/);
   assert.match(source, /\[--scope auto\|working-tree\|branch\]/);
-  assert.match(source, /--model <model\|spark>/);
+  assert.match(source, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(source, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(source, /are not focus text/i);
   assert.match(source, /run_in_background:\s*true/);
@@ -40,6 +40,14 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /When in doubt, run the review/i);
   assert.match(source, /\(Recommended\)/);
   assert.match(source, /does not support staged-only review, unstaged-only review, or extra focus text/i);
+  assert.match(source, /Preserve the user's INTENT exactly/i);
+  assert.match(source, /rewrite a natural-language model or effort mention into the corresponding/i);
+  assert.match(source, /Model\/effort recognition \(natural-language phrases\):/i);
+  assert.match(source, /in ANY natural language, including transliteration, typos, and non-Latin scripts/i);
+  assert.match(source, /Canonical model aliases \(the only values `--model` accepts as short names\): `spark` → gpt-5\.3-codex-spark/i);
+  assert.match(source, /Canonical reasoning efforts \(the only values `--effort` accepts\): `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`/i);
+  assert.match(source, /use `AskUserQuestion` once with a suggested corrected command/i);
+  assert.match(source, /Examples only, not exhaustive/i);
 });
 
 test("adversarial review command uses AskUserQuestion and background Bash while staying review-only", () => {
@@ -53,7 +61,7 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /```typescript/);
   assert.match(source, /adversarial-review "\$ARGUMENTS"/);
   assert.match(source, /\[--scope auto\|working-tree\|branch\].*\[focus \.\.\.\]/);
-  assert.match(source, /--model <model\|spark>/);
+  assert.match(source, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(source, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(source, /must not become part of the focus text/i);
   assert.match(source, /run_in_background:\s*true/);
@@ -74,6 +82,11 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /supports working-tree review, branch review, and `--base <ref>`/i);
   assert.match(source, /does not support `--scope staged` or `--scope unstaged`/i);
   assert.match(source, /can still take extra focus text after the flags/i);
+  assert.match(source, /Preserve the user's INTENT exactly/i);
+  assert.match(source, /Model\/effort recognition \(natural-language phrases\):/i);
+  assert.match(source, /in ANY natural language, including transliteration, typos, and non-Latin scripts/i);
+  assert.match(source, /Strip ONLY the recognized model\/effort words from the phrase/i);
+  assert.match(source, /Examples only, not exhaustive/i);
 });
 
 test("continue is not exposed as a user-facing command", () => {
@@ -109,7 +122,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.doesNotMatch(rescue, /^context:\s*fork\b/m);
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
-  assert.match(rescue, /--model <model\|spark>/);
+  assert.match(rescue, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(rescue, /task-resume-candidate --json/);
   assert.match(rescue, /AskUserQuestion/);
@@ -121,6 +134,11 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
   assert.match(rescue, /If they ask for `spark`, map it to `gpt-5\.3-codex-spark`/i);
+  assert.match(rescue, /If they ask for `sol`\/`terra`\/`luna`, map to `gpt-5\.6-sol`\/`gpt-5\.6-terra`\/`gpt-5\.6-luna`/i);
+  assert.match(rescue, /including transliteration, typos, and non-Latin scripts such as Cyrillic, Thai, or Japanese/i);
+  assert.match(rescue, /Canonical efforts: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`/i);
+  assert.match(rescue, /Canonical model aliases: `spark` → gpt-5\.3-codex-spark/i);
+  assert.match(rescue, /Examples only, not exhaustive/i);
   assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
   assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
   assert.match(rescue, /If the user chooses continue, add `--resume`/i);
