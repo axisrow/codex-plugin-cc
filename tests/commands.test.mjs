@@ -22,7 +22,7 @@ test("review command uses AskUserQuestion and background Bash while staying revi
   assert.match(source, /```typescript/);
   assert.match(source, /review "\$ARGUMENTS"/);
   assert.match(source, /\[--scope auto\|working-tree\|branch\]/);
-  assert.match(source, /--model <model\|spark>/);
+  assert.match(source, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(source, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(source, /are not focus text/i);
   assert.match(source, /run_in_background:\s*true/);
@@ -53,7 +53,7 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /```typescript/);
   assert.match(source, /adversarial-review "\$ARGUMENTS"/);
   assert.match(source, /\[--scope auto\|working-tree\|branch\].*\[focus \.\.\.\]/);
-  assert.match(source, /--model <model\|spark>/);
+  assert.match(source, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(source, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(source, /must not become part of the focus text/i);
   assert.match(source, /run_in_background:\s*true/);
@@ -109,7 +109,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.doesNotMatch(rescue, /^context:\s*fork\b/m);
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
-  assert.match(rescue, /--model <model\|spark>/);
+  assert.match(rescue, /--model <model\|spark\|sol\|terra\|luna>/);
   assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra>/);
   assert.match(rescue, /task-resume-candidate --json/);
   assert.match(rescue, /AskUserQuestion/);
@@ -121,6 +121,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
   assert.match(rescue, /If they ask for `spark`, map it to `gpt-5\.3-codex-spark`/i);
+  assert.match(rescue, /If they ask for `sol`\/`terra`\/`luna`, map to `gpt-5\.6-sol`\/`gpt-5\.6-terra`\/`gpt-5\.6-luna`/i);
   assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
   assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
   assert.match(rescue, /If the user chooses continue, add `--resume`/i);
