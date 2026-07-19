@@ -345,6 +345,21 @@ export function deleteWorktreeBranch(repoRoot, branch) {
   git(repoRoot, ["branch", "-D", branch]);
 }
 
+// Detect uncommitted work that `git add -A` skipped because it is git-ignored
+// (e.g. .env, dist/, build artifacts Codex wrote). A worktree whose only changes
+// are ignored would produce an empty patch and be mistaken for "no changes" —
+// force-removing it would irreversibly destroy that work. Returns true if any
+// ignored file in the worktree differs from the base worktree state.
+export function hasIgnoredChanges(worktreePath) {
+  // --porcelain: !! marks ignored entries. Only ignored files that exist as
+  // working-tree content count; an empty worktree (fresh from HEAD) lists none.
+  const result = git(worktreePath, ["status", "--porcelain", "--ignored", "-uall"]);
+  if (result.status !== 0) {
+    return false;
+  }
+  return result.stdout.split("\n").some((line) => line.startsWith("!! ") && line.length > 3);
+}
+
 export function getWorktreeDiff(worktreePath, baseCommit) {
   // gitChecked (not git): a failed snapshot (e.g. index lock held by a concurrent
   // git op) must throw, not be classified as "no changes" — otherwise callers would

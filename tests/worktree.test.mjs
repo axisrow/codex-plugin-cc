@@ -289,3 +289,36 @@ test("cleanupWorktreeSession keep round-trips a non-UTF-8 byte (0xff) without co
     cleanupSession(session);
   }
 });
+
+// Regression: "No changes to apply" must not force-remove a worktree that holds
+// ignored-only work. `git add -A` skips git-ignored paths (.env, dist/, build
+// artifacts), so an ignored-only worktree produces an empty patch. Before the
+// fix, keep would force-remove it and lose the artifacts irreversibly. Now the
+// worktree + branch are preserved and the result surfaces the situation.
+test("cleanupWorktreeSession keep preserves the worktree when only ignored files changed", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  // Make this test repo ignore dist/ so the worktree's artifact is ignored.
+  fs.writeFileSync(path.join(repoRoot, ".gitignore"), "dist/\n");
+  assert.equal(run("git", ["add", ".gitignore"], { cwd: repoRoot }).status, 0);
+  assert.equal(run("git", ["commit", "-m", "gitignore"], { cwd: repoRoot }).status, 0);
+
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.mkdirSync(path.join(session.worktreePath, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(session.worktreePath, "dist", "artifact.txt"), "precious\n");
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, false);
+    assert.match(result.detail, /ignored files/);
+    // The worktree and its ignored artifact MUST be preserved.
+    assert.equal(fs.existsSync(session.worktreePath), true);
+    assert.equal(
+      fs.readFileSync(path.join(session.worktreePath, "dist", "artifact.txt"), "utf8"),
+      "precious\n"
+    );
+  } finally {
+    cleanupSession(session);
+  }
+});
