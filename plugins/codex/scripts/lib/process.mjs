@@ -13,11 +13,14 @@ export function runCommand(command, args = [], options = {}) {
     windowsHide: true
   });
 
-  const succeeded = result.status === 0 && result.signal === null;
-  // A child killed by signal has status: null. Treat that as a non-zero exit
-  // (not a success) so callers that check status===0 don't mistake a
-  // signal-terminated process (e.g. git apply killed mid-run) for success.
-  const status = result.signal !== null ? 1 : result.status ?? 0;
+  const succeeded = result.status === 0 && result.signal === null && !result.error;
+  // A child that was killed by a signal OR failed to spawn (ENOENT, EAGAIN,
+  // maxBuffer) returns status:null. Treat any of those as a non-zero exit so
+  // callers that check status===0 don't mistake an abnormal git op (killed
+  // mid-run, missing binary) for success — for worktree cleanup that would mean
+  // deleting the only copy of unapplied changes.
+  const failed = result.signal !== null || result.error;
+  const status = failed ? 1 : result.status ?? 0;
 
   return {
     command,

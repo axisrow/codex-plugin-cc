@@ -364,19 +364,21 @@ export function getWorktreeDiff(worktreePath, baseCommit) {
 
 export function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
   gitChecked(worktreePath, ["add", "-A"]);
-  const patchResult = git(worktreePath, ["diff", "--cached", baseCommit]);
-  if (patchResult.status !== 0) {
-    throw new Error(`Failed to snapshot worktree changes: ${patchResult.stderr.trim()}`);
-  }
-  if (!patchResult.stdout.trim()) {
-    return { applied: false, detail: "No changes to apply." };
-  }
   const patchPath = path.join(
     repoRoot,
     ".codex-worktree-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".patch"
   );
   try {
-    fs.writeFileSync(patchPath, patchResult.stdout, "utf8");
+    // Write the patch via `git diff --output=<file>` so the bytes flow directly
+    // git→file, never through a JS string. runCommand decodes stdout as UTF-8,
+    // which would replace invalid bytes (0xff, NUL, legacy encodings) with
+    // U+FFFD and then apply a corrupted patch as "success" — destroying the
+    // only correct copy in the worktree. Detect empty via file size instead.
+    const diffResult = gitChecked(worktreePath, ["diff", "--cached", "--binary", baseCommit, "--output", patchPath]);
+    void diffResult;
+    if (!fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0) {
+      return { applied: false, detail: "No changes to apply." };
+    }
     const applyResult = git(repoRoot, ["apply", "--index", patchPath]);
     if (applyResult.status !== 0) {
       return { applied: false, detail: applyResult.stderr.trim() || "Patch apply failed (conflicts?)." };

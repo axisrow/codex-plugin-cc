@@ -261,3 +261,31 @@ test("removeWorktree is a no-op (no throw) when the worktree is already removed"
   removeWorktree(repoRoot, session.worktreePath);
   assert.doesNotThrow(() => removeWorktree(repoRoot, session.worktreePath));
 });
+
+// Regression: the keep patch path must be byte-preserving. runCommand decodes
+// stdout as UTF-8, which corrupts invalid bytes (0xff, NUL, legacy encodings)
+// into U+FFFD. applyWorktreePatch now writes the patch via `git diff --output`
+// (git→file, no JS string), so binary/non-UTF-8 changes round-trip exactly —
+// otherwise keep would apply a corrupted patch as "success" then destroy the
+// only correct copy in the worktree (openai#137 cycle-2 review finding).
+test("cleanupWorktreeSession keep round-trips a non-UTF-8 byte (0xff) without corruption", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    // Write a file containing a raw 0xff byte in the worktree.
+    fs.writeFileSync(path.join(session.worktreePath, "binary.bin"), Buffer.from([0xff, 0x00, 0x41, 0xff]));
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+    assert.equal(result.applied, true);
+
+    const applied = fs.readFileSync(path.join(repoRoot, "binary.bin"));
+    assert.deepEqual(
+      Array.from(applied),
+      [0xff, 0x00, 0x41, 0xff],
+      `binary bytes must round-trip exactly; got ${Array.from(applied)} (U+FFFD corruption would show 0xEF 0xBF 0xBD)`
+    );
+  } finally {
+    cleanupSession(session);
+  }
+});

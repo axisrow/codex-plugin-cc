@@ -96,3 +96,14 @@ test("runCommand reports a signal-terminated child as failed (non-zero status)",
   assert.ok(result.signal !== null, `expected a signal, got signal=${result.signal}`);
   assert.notEqual(result.status, 0, `signal-terminated child must not report status 0, got ${result.status}`);
 });
+
+// Regression: a child that fails to spawn (ENOENT — missing binary) returns
+// status:null, signal:null, error:ENOENT from spawnSync. runCommand must NOT
+// normalize that to status:0 — callers checking status===0 would mistake a
+// missing/failed git op for success, which for worktree cleanup destroys the
+// only copy of unapplied changes (openai#137 cycle-2 review finding).
+test("runCommand reports a spawn failure (ENOENT) as failed (non-zero status)", () => {
+  const result = runCommand("/nonexistent-codex-binary-xyz", []);
+  assert.ok(result.error, `expected an error, got ${result.error}`);
+  assert.notEqual(result.status, 0, `spawn failure must not report status 0, got ${result.status}`);
+});
