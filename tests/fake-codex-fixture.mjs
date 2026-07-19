@@ -1,8 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { writeExecutable } from "./helpers.mjs";
+import { registerTrackedTempDir, writeExecutable } from "./helpers.mjs";
 
 export function installFakeCodex(binDir, behavior = "review-ok", version = "codex-cli test") {
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -764,11 +765,51 @@ rl.on("line", (line) => {
   }
 }
 
+// One ephemeral CLAUDE_PLUGIN_DATA per worker process. Without this, buildEnv
+// spreads ...process.env and inherits the real plugin data dir (or the
+// $TMPDIR/codex-companion fallback), so tests write broker.json/state.json
+// into the live plugin's data and leave them behind. Pointing state at a
+// known temp root is also what lets the parent sweep find every broker.json
+// spawned by any worker.
+//
+// We deliberately do NOT mutate process.env here: some tests spawn the
+// companion without passing env (so it inherits process.env) and read state
+// back through resolveStateDir in the same process — both paths must agree.
+// Setting CLAUDE_PLUGIN_DATA only on the returned env object keeps that
+// invariant for tests that go through buildEnv, while tests that manage their
+// own env (or rely on the unset fallback) keep working unchanged.
+// One ephemeral CLAUDE_PLUGIN_DATA per worker process. Without this, buildEnv
+// spreads ...process.env and inherits the real plugin data dir (or the
+// $TMPDIR/codex-companion fallback), so tests write broker.json/state.json
+// into the live plugin's data and leave them behind.
+//
+// We set process.env.CLAUDE_PLUGIN_DATA here (not just the returned env) so
+// the worker process itself resolves state to the same root as the companion
+// subprocesses it spawns. Tests like broker-lifecycle's "concurrent startup"
+// spawn a child that calls ensureBrokerSession with buildEnv()'s env (root A),
+// then call loadBrokerSession(repo) in-process — without this mutation that
+// in-process read would resolve through the unset fallback (root B) and miss
+// the broker.json the child wrote. Because the temp root lives under
+// os.tmpdir(), state.test.mjs's startsWith(os.tmpdir()) assertion still holds.
+let testPluginDataDir = null;
+export function getTestPluginDataDir() {
+  if (!testPluginDataDir) {
+    testPluginDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-test-data-"));
+    registerTrackedTempDir(testPluginDataDir);
+    process.env.CLAUDE_PLUGIN_DATA = testPluginDataDir;
+  }
+  return testPluginDataDir;
+}
+
 export function buildEnv(binDir) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
     PATH: `${binDir}${sep}${process.env.PATH}`,
+    // Isolate plugin state from the host. Per-workspace state is still
+    // namespaced under this root by resolveStateDir (sha256(realpath(cwd))),
+    // so concurrent test workspaces do not collide.
+    CLAUDE_PLUGIN_DATA: getTestPluginDataDir(),
     // Production keeps an idle broker warm for 15 minutes. Tests only need a
     // brief reuse window and should not leave dozens of detached helpers.
     CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "2000"
