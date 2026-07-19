@@ -63,6 +63,12 @@ export function initGitRepo(cwd) {
 // ---------------------------------------------------------------------------
 
 const trackedTempDirs = new Set();
+// Plugin-data roots hold broker.json; removing them before the broker is
+// reaped would orphan a live process AND make it undiscoverable. So on the
+// sync 'exit' path (where we cannot await a reap) we must NOT remove these —
+// leave them for the parent global-teardown sweep. On the async signal path
+// we reap first, then remove them.
+const trackedPluginDataDirs = new Set();
 const trackedWorkspaces = new Set();
 let workerTeardownStarted = false;
 let workerHandlersRegistered = false;
@@ -78,6 +84,14 @@ export function registerTrackedTempDir(dir) {
 export function registerBrokerWorkspace(cwd) {
   if (typeof cwd === "string" && cwd) {
     trackedWorkspaces.add(cwd);
+  }
+}
+
+/** Register the per-worker ephemeral CLAUDE_PLUGIN_DATA root. Removed only AFTER
+ *  broker reaping (signal path); on sync exit it is left for the parent sweep. */
+export function registerPluginDataDir(dir) {
+  if (typeof dir === "string" && dir) {
+    trackedPluginDataDirs.add(dir);
   }
 }
 
@@ -98,34 +112,38 @@ function ensureWorkerExitHandlers() {
   }
   workerHandlersRegistered = true;
 
-  const reapAndClean = (signal) => {
+  // On a signal (SIGINT/SIGTERM) we CAN await — run the full reap (probe +
+  // shutdown + tree-kill + remove files) before exiting. On 'exit' we CANNOT
+  // await (sync-only); there we must NOT destroy broker.json / pid-file /
+  // sessionDir / the plugin-data root, because a still-running broker would be
+  // orphaned AND undiscoverable (the parent sweep keys on broker.json). Leave
+  // the broker metadata intact for the parent global-teardown to reap; only
+  // remove the non-broker temp dirs (workspace/binDir/home) we created.
+  const onSignal = (signal) => {
     if (workerTeardownStarted) {
       return;
     }
     workerTeardownStarted = true;
-    try {
-      reapWorkerBrokers(signal != null);
-    } catch {
-      // Best-effort: never let teardown mask the original failure.
-    }
-    try {
-      rmTrackedTempDirs();
-    } catch {}
+    Promise.resolve(reapWorkerBrokers(true))
+      .catch(() => {})
+      .finally(() => {
+        try { rmTrackedTempDirs(); } catch {}
+        try { rmPluginDataDirs(); } catch {}
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      });
   };
 
-  // 'exit' is synchronous-only — no awaits, no RPC. We can only unlink files
-  // and rm dirs here. Process reaping is left to the async signal handlers
-  // (when a signal arrives) and to the parent global-teardown sweep.
-  process.on("exit", () => reapAndClean(null));
+  process.on("exit", () => {
+    if (workerTeardownStarted) {
+      return;
+    }
+    workerTeardownStarted = true;
+    // Sync-only: do NOT touch broker metadata here (see onSignal comment).
+    try { rmTrackedTempDirs(); } catch {}
+  });
 
-  process.on("SIGINT", () => {
-    reapAndClean("SIGINT");
-    process.exit(130);
-  });
-  process.on("SIGTERM", () => {
-    reapAndClean("SIGTERM");
-    process.exit(143);
-  });
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
 }
 
 /**
@@ -137,14 +155,19 @@ function ensureWorkerExitHandlers() {
  * is actually live. A stale broker.json may point at a pid the OS recycled into
  * an unrelated process — tree-killing there would kill the wrong thing. Mirrors
  * loadReusableBrokerSessionUnlocked (broker-lifecycle.mjs:193-216).
+ *
+ * Only called from the async signal path (onSignal) where awaits are safe.
+ * The sync 'exit' path deliberately does NOT call this — destroying broker
+ * metadata without first terminating the process would orphan a live broker
+ * and make it undiscoverable to the parent sweep.
  */
-async function reapWorkerBrokers(canAwait) {
+async function reapWorkerBrokers() {
   for (const cwd of trackedWorkspaces) {
     const session = loadBrokerSession(cwd);
     if (!session) {
       continue;
     }
-    const ready = canAwait && session.endpoint
+    const ready = session.endpoint
       ? safeAwait(waitForBrokerEndpoint(session.endpoint, 150), false)
       : false;
     const killProcess = ready ? terminateProcessTree : null;
@@ -165,6 +188,18 @@ async function reapWorkerBrokers(canAwait) {
 
 function rmTrackedTempDirs() {
   for (const dir of trackedTempDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort.
+    }
+  }
+}
+
+// Plugin-data roots are removed ONLY after a reap, because they hold the
+// broker.json the parent sweep needs to find any broker this worker missed.
+function rmPluginDataDirs() {
+  for (const dir of trackedPluginDataDirs) {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

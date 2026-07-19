@@ -25,12 +25,17 @@ import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
 
 const TEST_DATA_PREFIX = "codex-plugin-test-data-";
 
+// node:test's global teardown contract: the runner looks for a NAMED
+// `globalTeardown` export on the module — the function RETURNED by globalSetup
+// is NOT called (verified empirically against Node 25.9.0). Both must be
+// named exports; returning teardown from setup is a no-op.
 export async function globalSetup() {
   registerParentHandlers();
-  return async function globalTeardown() {
-    await sweepOrphanedBrokers();
-    rmTestPluginDataDirs();
-  };
+}
+
+export async function globalTeardown() {
+  await sweepOrphanedBrokers();
+  rmTestPluginDataDirs();
 }
 
 function registerParentHandlers() {

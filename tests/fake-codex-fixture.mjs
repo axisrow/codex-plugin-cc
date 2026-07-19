@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { registerTrackedTempDir, writeExecutable } from "./helpers.mjs";
+import { registerPluginDataDir, writeExecutable } from "./helpers.mjs";
 
 export function installFakeCodex(binDir, behavior = "review-ok", version = "codex-cli test") {
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -768,19 +768,6 @@ rl.on("line", (line) => {
 // One ephemeral CLAUDE_PLUGIN_DATA per worker process. Without this, buildEnv
 // spreads ...process.env and inherits the real plugin data dir (or the
 // $TMPDIR/codex-companion fallback), so tests write broker.json/state.json
-// into the live plugin's data and leave them behind. Pointing state at a
-// known temp root is also what lets the parent sweep find every broker.json
-// spawned by any worker.
-//
-// We deliberately do NOT mutate process.env here: some tests spawn the
-// companion without passing env (so it inherits process.env) and read state
-// back through resolveStateDir in the same process — both paths must agree.
-// Setting CLAUDE_PLUGIN_DATA only on the returned env object keeps that
-// invariant for tests that go through buildEnv, while tests that manage their
-// own env (or rely on the unset fallback) keep working unchanged.
-// One ephemeral CLAUDE_PLUGIN_DATA per worker process. Without this, buildEnv
-// spreads ...process.env and inherits the real plugin data dir (or the
-// $TMPDIR/codex-companion fallback), so tests write broker.json/state.json
 // into the live plugin's data and leave them behind.
 //
 // We set process.env.CLAUDE_PLUGIN_DATA here (not just the returned env) so
@@ -795,7 +782,7 @@ let testPluginDataDir = null;
 export function getTestPluginDataDir() {
   if (!testPluginDataDir) {
     testPluginDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-plugin-test-data-"));
-    registerTrackedTempDir(testPluginDataDir);
+    registerPluginDataDir(testPluginDataDir);
     process.env.CLAUDE_PLUGIN_DATA = testPluginDataDir;
   }
   return testPluginDataDir;
