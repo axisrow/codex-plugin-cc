@@ -8,7 +8,7 @@ import {
   diffWorktreeSession,
   cleanupWorktreeSession
 } from "../plugins/codex/scripts/lib/worktree.mjs";
-import { getWorktreeDiff } from "../plugins/codex/scripts/lib/git.mjs";
+import { getWorktreeDiff, removeWorktree } from "../plugins/codex/scripts/lib/git.mjs";
 import { renderWorktreeTaskResult } from "../plugins/codex/scripts/lib/render.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
@@ -246,4 +246,18 @@ test("renderWorktreeTaskResult falls back to JOB_ID when jobId is null", () => {
 
   assert.match(output, /worktree-cleanup JOB_ID --action keep/);
   assert.match(output, /worktree-cleanup JOB_ID --action discard/);
+});
+
+// Regression: removeWorktree must not throw when the worktree is already gone
+// (prior cleanup, rm, crash). The old guard matched git's "is not a working tree"
+// stderr text, which is locale-translated (ru_RU: "не является рабочим каталогом")
+// — on non-English locales it threw, leaking the codex/<ts> branch forever.
+// Locale-safe: check git worktree list, no-op if the path is not registered.
+test("removeWorktree is a no-op (no throw) when the worktree is already removed", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+  // Remove it once via the session helper path, then call removeWorktree again
+  // against the now-gone path — must not throw.
+  removeWorktree(repoRoot, session.worktreePath);
+  assert.doesNotThrow(() => removeWorktree(repoRoot, session.worktreePath));
 });

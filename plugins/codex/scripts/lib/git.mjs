@@ -321,8 +321,22 @@ export function createWorktree(repoRoot) {
 }
 
 export function removeWorktree(repoRoot, worktreePath) {
+  // Locale-safe: git's "is not a working tree" message is translated on non-English
+  // locales (e.g. ru_RU: "не является рабочим каталогом"), so never match stderr text.
+  // If the worktree is already gone (prior cleanup, rm, crash), treat it as success.
+  const canonical = (p) => {
+    try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+  };
+  const target = canonical(worktreePath);
+  const listed = git(repoRoot, ["worktree", "list", "--porcelain"]).stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => canonical(line.slice("worktree ".length).trim()));
+  if (!listed.includes(target)) {
+    return; // already removed — desired end-state reached
+  }
   const result = git(repoRoot, ["worktree", "remove", "--force", worktreePath]);
-  if (result.status !== 0 && !result.stderr.includes("is not a working tree")) {
+  if (result.status !== 0) {
     throw new Error(`Failed to remove worktree: ${result.stderr.trim()}`);
   }
 }
@@ -332,9 +346,15 @@ export function deleteWorktreeBranch(repoRoot, branch) {
 }
 
 export function getWorktreeDiff(worktreePath, baseCommit) {
-  git(worktreePath, ["add", "-A"]);
+  // gitChecked (not git): a failed snapshot (e.g. index lock held by a concurrent
+  // git op) must throw, not be classified as "no changes" — otherwise callers would
+  // treat real work as empty and discard the only copy.
+  gitChecked(worktreePath, ["add", "-A"]);
   const result = git(worktreePath, ["diff", "--cached", baseCommit, "--stat"]);
-  if (result.status !== 0 || !result.stdout.trim()) {
+  if (result.status !== 0) {
+    throw new Error(`Failed to diff worktree: ${result.stderr.trim()}`);
+  }
+  if (!result.stdout.trim()) {
     return { stat: "", patch: "" };
   }
   const stat = result.stdout.trim();
@@ -343,9 +363,12 @@ export function getWorktreeDiff(worktreePath, baseCommit) {
 }
 
 export function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
-  git(worktreePath, ["add", "-A"]);
+  gitChecked(worktreePath, ["add", "-A"]);
   const patchResult = git(worktreePath, ["diff", "--cached", baseCommit]);
-  if (patchResult.status !== 0 || !patchResult.stdout.trim()) {
+  if (patchResult.status !== 0) {
+    throw new Error(`Failed to snapshot worktree changes: ${patchResult.stderr.trim()}`);
+  }
+  if (!patchResult.stdout.trim()) {
     return { applied: false, detail: "No changes to apply." };
   }
   const patchPath = path.join(

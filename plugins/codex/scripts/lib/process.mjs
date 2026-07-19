@@ -14,11 +14,15 @@ export function runCommand(command, args = [], options = {}) {
   });
 
   const succeeded = result.status === 0 && result.signal === null;
+  // A child killed by signal has status: null. Treat that as a non-zero exit
+  // (not a success) so callers that check status===0 don't mistake a
+  // signal-terminated process (e.g. git apply killed mid-run) for success.
+  const status = result.signal !== null ? 1 : result.status ?? 0;
 
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",

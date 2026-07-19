@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+import { terminateProcessTree, runCommand } from "../plugins/codex/scripts/lib/process.mjs";
 
 test("terminateProcessTree uses taskkill on Windows", () => {
   let captured = null;
@@ -83,4 +83,16 @@ test("terminateProcessTree recognizes a missing Windows process with localized o
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.delivered, false);
   assert.equal(outcome.method, "taskkill");
+});
+
+// Regression: a child killed by signal has status:null from spawnSync. runCommand
+// must NOT normalize that to status:0 — callers checking status===0 would mistake a
+// signal-terminated process (e.g. git apply killed mid-run) for success, which for
+// worktree cleanup means deleting the only copy of unapplied changes (openai#137
+// review finding). Signal-terminated => status != 0.
+test("runCommand reports a signal-terminated child as failed (non-zero status)", () => {
+  // `node -e 'process.kill(process.pid, "SIGKILL")'` terminates itself with a signal.
+  const result = runCommand(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"]);
+  assert.ok(result.signal !== null, `expected a signal, got signal=${result.signal}`);
+  assert.notEqual(result.status, 0, `signal-terminated child must not report status 0, got ${result.status}`);
 });
