@@ -73,7 +73,8 @@ const trackedWorkspaces = new Set();
 let workerTeardownStarted = false;
 let workerHandlersRegistered = false;
 
-/** Register any temp path (workspace, binDir, plugin-data root) for rm -rf at exit. */
+/** Register a non-broker temp path (workspace, binDir, home) for rm -rf at exit.
+ *  Plugin-data roots go through registerPluginDataDir (removed only after reap). */
 export function registerTrackedTempDir(dir) {
   if (typeof dir === "string" && dir) {
     trackedTempDirs.add(dir);
@@ -124,7 +125,7 @@ function ensureWorkerExitHandlers() {
       return;
     }
     workerTeardownStarted = true;
-    Promise.resolve(reapWorkerBrokers(true))
+    Promise.resolve(reapWorkerBrokers())
       .catch(() => {})
       .finally(() => {
         try { rmTrackedTempDirs(); } catch {}
@@ -168,7 +169,7 @@ async function reapWorkerBrokers() {
       continue;
     }
     const ready = session.endpoint
-      ? safeAwait(waitForBrokerEndpoint(session.endpoint, 150), false)
+      ? await safeAwait(waitForBrokerEndpoint(session.endpoint, 150), false)
       : false;
     const killProcess = ready ? terminateProcessTree : null;
     if (ready && session.endpoint) {
