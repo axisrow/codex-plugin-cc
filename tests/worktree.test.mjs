@@ -1,0 +1,284 @@
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  createWorktreeSession,
+  diffWorktreeSession,
+  cleanupWorktreeSession
+} from "../plugins/codex/scripts/lib/worktree.mjs";
+import { getWorktreeDiff } from "../plugins/codex/scripts/lib/git.mjs";
+import { renderWorktreeTaskResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+
+function gitStdout(cwd, args) {
+  const result = run("git", args, { cwd });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function commitFile(cwd, fileName = "app.js", contents = "export const value = 1;\n") {
+  fs.writeFileSync(path.join(cwd, fileName), contents);
+  assert.equal(run("git", ["add", fileName], { cwd }).status, 0);
+  const commit = run("git", ["commit", "-m", "init"], { cwd });
+  assert.equal(commit.status, 0, commit.stderr);
+}
+
+function createRepoWithInitialCommit() {
+  const repoRoot = makeTempDir();
+  initGitRepo(repoRoot);
+  commitFile(repoRoot);
+  return { repoRoot };
+}
+
+// Manual worktree+branch cleanup for test fixtures (the production library
+// leaves them in place by design; tests must tidy up themselves).
+function removeSession(session) {
+  if (!session) {
+    return;
+  }
+  try {
+    run("git", ["worktree", "remove", "--force", session.worktreePath], { cwd: session.repoRoot });
+  } catch {
+    // already gone
+  }
+  try {
+    run("git", ["branch", "-D", session.branch], { cwd: session.repoRoot });
+  } catch {
+    // already gone
+  }
+}
+
+test("createWorktreeSession returns session with worktreePath, branch, repoRoot, baseCommit", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    // macOS symlinks /var → /private/var; git canonicalizes repoRoot while
+    // makeTempDir returns the symlinked path. Compare via realpath like #497.
+    assert.equal(fs.realpathSync(session.repoRoot), fs.realpathSync(repoRoot));
+    assert.match(session.branch, /^codex\/\d+$/);
+    assert.equal(fs.realpathSync(session.worktreePath), fs.realpathSync(path.join(repoRoot, ".worktrees", `codex-${session.timestamp}`)));
+    assert.ok(session.baseCommit);
+    assert.ok(fs.existsSync(session.worktreePath));
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("createWorktreeSession baseCommit matches repo HEAD at creation time", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const headAtCreation = gitStdout(repoRoot, ["rev-parse", "HEAD"]);
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(repoRoot, "app.js"), "export const value = 2;\n");
+    assert.equal(run("git", ["add", "app.js"], { cwd: repoRoot }).status, 0);
+    const commit = run("git", ["commit", "-m", "repo-root change"], { cwd: repoRoot });
+    assert.equal(commit.status, 0, commit.stderr);
+
+    const newHead = gitStdout(repoRoot, ["rev-parse", "HEAD"]);
+    assert.equal(session.baseCommit, headAtCreation);
+    assert.notEqual(newHead, session.baseCommit);
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("diffWorktreeSession captures uncommitted changes in the worktree", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(session.worktreePath, "app.js"), "export const value = 2;\n");
+
+    const diff = diffWorktreeSession(session);
+
+    assert.deepEqual(diff, getWorktreeDiff(session.worktreePath, session.baseCommit));
+    assert.notEqual(diff.stat, "");
+    assert.match(diff.stat, /app\.js/);
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("diffWorktreeSession captures new untracked files in the worktree", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(session.worktreePath, "newfile.js"), "export const added = true;\n");
+
+    const diff = diffWorktreeSession(session);
+
+    assert.notEqual(diff.stat, "");
+    assert.match(diff.stat, /newfile\.js/);
+    assert.match(diff.patch, /added = true/);
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("diffWorktreeSession returns empty when no changes made", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    const diff = diffWorktreeSession(session);
+    assert.deepEqual(diff, { stat: "", patch: "" });
+  } finally {
+    removeSession(session);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Leave-branch invariant: the worktree + branch ALWAYS survive cleanup.
+// These replace the old capture-then-remove tests. Under leave-branch there is
+// no Destroy path, so the whole fail-open class (ignored/mixed/submodule/TOCTOU)
+// is closed by construction — the assertions below are the proof.
+// ---------------------------------------------------------------------------
+
+test("keep applies tracked changes to repoRoot AND preserves the worktree + branch", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(session.worktreePath, "newfile.js"), "export const added = true;\n");
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, true);
+    assert.equal(result.preserved, true);
+    assert.ok(fs.existsSync(path.join(repoRoot, "newfile.js")), "tracked change applied to repoRoot");
+    // INVARIANT: worktree + branch still exist.
+    assert.equal(fs.existsSync(session.worktreePath), true, "worktree preserved");
+    const branches = gitStdout(repoRoot, ["branch", "--list", session.branch]);
+    assert.match(branches, new RegExp(session.branch), "branch preserved");
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("keep with only ignored changes preserves the worktree (ignored files are NOT lost)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  fs.writeFileSync(path.join(repoRoot, ".gitignore"), "dist/\n");
+  assert.equal(run("git", ["add", ".gitignore"], { cwd: repoRoot }).status, 0);
+  assert.equal(run("git", ["commit", "-m", "gitignore"], { cwd: repoRoot }).status, 0);
+
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.mkdirSync(path.join(session.worktreePath, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(session.worktreePath, "dist", "artifact.txt"), "precious\n");
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    // No tracked changes to apply, but the ignored artifact MUST survive.
+    assert.equal(result.preserved, true);
+    assert.equal(fs.existsSync(session.worktreePath), true);
+    assert.equal(
+      fs.readFileSync(path.join(session.worktreePath, "dist", "artifact.txt"), "utf8"),
+      "precious\n",
+      "ignored artifact preserved (not destroyed)"
+    );
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("keep with mixed tracked + ignored changes applies tracked AND preserves ignored", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  fs.writeFileSync(path.join(repoRoot, ".gitignore"), "dist/\n");
+  assert.equal(run("git", ["add", ".gitignore"], { cwd: repoRoot }).status, 0);
+  assert.equal(run("git", ["commit", "-m", "gitignore"], { cwd: repoRoot }).status, 0);
+
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    // Tracked edit + ignored artifact at the same time.
+    fs.writeFileSync(path.join(session.worktreePath, "app.js"), "export const value = 2;\n");
+    fs.mkdirSync(path.join(session.worktreePath, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(session.worktreePath, "dist", "build.txt"), "compiled\n");
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, true, "tracked change applied");
+    assert.equal(result.preserved, true);
+    assert.match(fs.readFileSync(path.join(repoRoot, "app.js"), "utf8"), /value = 2/);
+    // INVARIANT: worktree still exists, ignored artifact intact.
+    assert.equal(fs.existsSync(session.worktreePath), true);
+    assert.equal(
+      fs.readFileSync(path.join(session.worktreePath, "dist", "build.txt"), "utf8"),
+      "compiled\n",
+      "ignored artifact preserved alongside tracked apply"
+    );
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("discard is a no-op that preserves the worktree + branch (never destroys)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(session.worktreePath, "app.js"), "export const value = 2;\n");
+
+    const result = cleanupWorktreeSession(session, { keep: false });
+
+    assert.equal(result.applied, false);
+    assert.equal(result.preserved, true);
+    // INVARIANT: discard does NOT remove anything. The work + branch survive.
+    assert.equal(fs.existsSync(session.worktreePath), true, "worktree preserved on discard");
+    assert.equal(
+      fs.readFileSync(path.join(session.worktreePath, "app.js"), "utf8"),
+      "export const value = 2;\n",
+      "discarded work still present in the preserved worktree"
+    );
+    const branches = gitStdout(repoRoot, ["branch", "--list", session.branch]);
+    assert.match(branches, new RegExp(session.branch), "branch preserved on discard");
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("keep round-trips a non-UTF-8 byte (0xff) without corruption (byte-preserving patch)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(path.join(session.worktreePath, "binary.bin"), Buffer.from([0xff, 0x00, 0x41, 0xff]));
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+    assert.equal(result.applied, true);
+
+    const applied = fs.readFileSync(path.join(repoRoot, "binary.bin"));
+    assert.deepEqual(
+      Array.from(applied),
+      [0xff, 0x00, 0x41, 0xff],
+      `binary bytes must round-trip exactly; U+FFFD corruption would show 0xEF 0xBF 0xBD`
+    );
+  } finally {
+    removeSession(session);
+  }
+});
+
+test("renderWorktreeTaskResult renders the manual-remove instructions (no destructive command)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    const diff = { stat: " app.js | 2 +-\n 1 file changed", patch: "..." };
+    const output = renderWorktreeTaskResult({ rendered: "task output" }, session, diff, { jobId: "job-123" });
+
+    assert.match(output, /Worktree \(preserved\)/);
+    assert.match(output, /git worktree remove --force/);
+    assert.match(output, /git branch -D/);
+    assert.match(output, /Ignored files/);
+    // No keep/discard CLI commands — leave-branch has no destructive action.
+    assert.doesNotMatch(output, /--action (keep|discard)/);
+  } finally {
+    removeSession(session);
+  }
+});

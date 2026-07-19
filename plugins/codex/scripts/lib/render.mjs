@@ -445,6 +445,58 @@ export function renderStoredJobResult(job, storedJob) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+// Worktree isolation render (leave-branch model). The worktree + branch are
+// ALWAYS preserved — keep applies the tracked patch and leaves them for manual
+// inspection. There is no destructive discard command.
+export function renderWorktreeTaskResult(execution, session, diff, { jobId = null } = {}) {
+  const lines = [];
+
+  if (execution.rendered) {
+    lines.push(execution.rendered.trimEnd());
+    lines.push("");
+  }
+
+  lines.push("---");
+  lines.push("");
+  lines.push("## Worktree (preserved)");
+  lines.push("");
+  lines.push(`Branch: \`${session.branch}\``);
+  lines.push(`Path: \`${session.worktreePath}\``);
+  lines.push("");
+
+  if (diff.stat) {
+    lines.push("### Changes");
+    lines.push("");
+    lines.push("```");
+    lines.push(diff.stat);
+    lines.push("```");
+    lines.push("");
+  } else {
+    lines.push("Codex made no tracked file changes in the worktree.");
+    lines.push("");
+  }
+
+  lines.push("### Inspect and remove manually");
+  lines.push("");
+  lines.push("The worktree and branch are kept for inspection. Review the diff, then remove:");
+  lines.push("");
+  lines.push(`- \`git -C ${session.worktreePath} diff\` (review)`);
+  lines.push(`- \`git worktree remove --force ${session.worktreePath} && git branch -D ${session.branch}\` (discard)`);
+  lines.push("");
+  lines.push("_Ignored files (e.g. .env, dist/) and submodule changes are NOT captured by the patch — copy them out of the worktree before removing._");
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export function renderWorktreeCleanupResult(action, result, session) {
+  const lines = ["# Worktree Cleanup", ""];
+  lines.push(`Action: ${action}.`);
+  lines.push(`Result: ${result.detail}`);
+  lines.push("");
+  lines.push(`The worktree \`${session.worktreePath}\` and branch \`${session.branch}\` are preserved regardless of this action — remove them manually after inspecting.`);
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
 export function renderCancelReport(job) {
   const lines = [
     "# Codex Cancel",
