@@ -133,7 +133,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /Continue current Codex thread/);
   assert.match(rescue, /Start a new Codex thread/);
   assert.match(rescue, /run the `codex:codex-rescue` subagent in the background/i);
-  assert.match(rescue, /default to foreground/i);
+  assert.match(rescue, /default to `--background`/i);
   assert.match(rescue, /Do not forward them to `task`/i);
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
@@ -155,9 +155,10 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /--resume/);
   assert.match(agent, /--fresh/);
   assert.match(agent, /thin forwarding wrapper/i);
-  assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
-  assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
-  assert.match(agent, /expected to exceed a few minutes.*`--background`/i);
+  assert.match(agent, /Default to `--background`/i);
+  assert.match(agent, /Add `--background` to the `task` invocation unless the caller explicitly chose `--wait`/i);
+  assert.match(rescue, /Terminal-on-timeout/i);
+  assert.match(agent, /A timed-out foreground run is terminal, not a signal to poll/i);
   assert.match(agent, /pass `--cwd <dir>` explicitly/i);
   assert.match(agent, /`--cwd <dir>` and `-C <dir>`.*workspace routing controls/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
@@ -168,7 +169,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
-  assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
+  assert.match(agent, /If the Bash call fails, returns by host Bash-tool timeout, or Codex cannot be invoked, return nothing/i);
   assert.match(agent, /gpt-5-4-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
   assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);

@@ -20,9 +20,9 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...`.
-- If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded rescue request.
-- If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution.
-- For any task expected to exceed a few minutes, add `--background` to the `task` invocation by default so a caller timeout cannot terminate it.
+- Default to `--background`. Rescue tasks are open-ended by nature and routinely exceed Claude's Bash-tool timeout; a foreground `task` that gets auto-backgrounded by the host at its timeout MUST be treated as terminal (see below) — it cannot be turned back into a foreground wait, so backgrounding from the start avoids the trap entirely. Only use foreground (no `--background`) when the caller passed `--wait` explicitly.
+- Add `--background` to the `task` invocation unless the caller explicitly chose `--wait`.
+- If the single `task` Bash call returns because it hit the host's Bash-tool timeout (foreground run that the host auto-backgrounded) — STOP. Do NOT issue a second Bash call. Do NOT poll `status`, `result`, `cat`, `sleep`, or `until grep`. Return the companion's stdout so far (possibly empty) as-is. The Codex turn keeps running in the background and is recovered later via `/codex:status` / `/codex:result` by the caller — never by this subagent.
 - Treat `--cwd <dir>` and `-C <dir>` as workspace routing controls. Pass `--cwd <dir>` explicitly on every `task` invocation, using the intended workspace root forwarded by the caller.
 - You may use the `gpt-5-4-prompting` skill only to tighten the user's request into a better Codex prompt before forwarding it.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
@@ -41,7 +41,7 @@ Forwarding rules:
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `codex-companion` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- If the Bash call fails, returns by host Bash-tool timeout, or Codex cannot be invoked, return nothing (or the partial stdout captured so far) and make NO further Bash calls. A timed-out foreground run is terminal, not a signal to poll.
 
 Response style:
 

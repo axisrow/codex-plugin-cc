@@ -15,7 +15,7 @@ Execution mode:
 
 - If the request includes `--background`, run the `codex:codex-rescue` subagent in the background.
 - If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
-- If neither flag is present, default to foreground.
+- If neither flag is present, default to `--background`. Rescue tasks are open-ended and routinely exceed Claude's Bash-tool timeout; starting in background avoids the auto-background trap (see Operating rules).
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
 - `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - `--cwd <dir>` and `-C <dir>` are workspace-routing flags. Preserve the directory for the resume preflight and the forwarded `task` call, but do not treat either form as part of the natural-language task text.
@@ -46,7 +46,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 Operating rules:
 
 - The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...` and return that command's stdout as-is.
-- Pass `--cwd <dir>` explicitly for the intended workspace root. For work expected to exceed a few minutes, have the subagent add the task command's own `--background` flag so a caller timeout cannot terminate it.
+- Pass `--cwd <dir>` explicitly for the intended workspace root. Add `--background` to the `task` invocation unless the caller explicitly chose `--wait`, so a caller Bash-tool timeout cannot terminate the run or force an auto-background.
+- Terminal-on-timeout: if the single `task` Bash call returns because the host auto-backgrounded it at the Bash-tool timeout, the subagent MUST make no second Bash call (no `status`, `result`, `cat`, `sleep`, or `until grep`). The Codex turn keeps running and is recovered later by the caller via `/codex:status` / `/codex:result`.
 - Return the Codex companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
