@@ -13,14 +13,23 @@ export function runCommand(command, args = [], options = {}) {
     windowsHide: true
   });
 
+  const succeeded = result.status === 0 && result.signal === null && !result.error;
+  // A child killed by a signal OR that failed to spawn (ENOENT/EAGAIN/maxBuffer)
+  // returns status:null from spawnSync. Treat any of those as a non-zero exit so
+  // callers that check status===0 don't mistake an abnormal process for success —
+  // for worktree patch capture/apply that would mean reporting a killed git op
+  // (false-success) while the work holds un-captured changes.
+  const failed = result.signal !== null || result.error;
+  const status = failed ? 1 : result.status ?? 0;
+
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
-    error: result.error ?? null
+    error: succeeded ? null : result.error ?? null
   };
 }
 

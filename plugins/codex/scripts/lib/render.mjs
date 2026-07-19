@@ -478,12 +478,16 @@ export function renderWorktreeTaskResult(execution, session, diff, { jobId = nul
 
   lines.push("### Inspect and remove manually");
   lines.push("");
-  lines.push("The worktree and branch are kept for inspection. Review the diff, then remove:");
+  lines.push("The worktree and branch are kept for inspection. Rescue changes are staged here — review with a HEAD-based diff that includes staged work:");
   lines.push("");
-  lines.push(`- \`git -C ${session.worktreePath} diff\` (review)`);
-  lines.push(`- \`git worktree remove --force ${session.worktreePath} && git branch -D ${session.branch}\` (discard)`);
+  lines.push(`- \`git -C ${session.worktreePath} diff ${session.baseCommit} --binary --submodule=diff\` (review tracked changes vs base, including staged)`);
+  lines.push(`- \`git -C ${session.worktreePath} status --porcelain --ignored -uall\` (also check for ignored/submodule work the diff will not show)`);
   lines.push("");
-  lines.push("_Ignored files (e.g. .env, dist/) and submodule changes are NOT captured by the patch — copy them out of the worktree before removing._");
+  lines.push(`Only once you have verified (or copied out) everything you need, remove:`);
+  lines.push("");
+  lines.push(`- \`git worktree remove --force ${session.worktreePath} && git branch -D ${session.branch}\``);
+  lines.push("");
+  lines.push("_Warning: ignored files (e.g. .env, dist/) and submodule changes are NOT in the diff above and are NOT captured by the apply patch — copy them out of the worktree before removing, or they are lost._");
 
   return `${lines.join("\n").trimEnd()}\n`;
 }

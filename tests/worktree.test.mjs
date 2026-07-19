@@ -275,9 +275,35 @@ test("renderWorktreeTaskResult renders the manual-remove instructions (no destru
     assert.match(output, /Worktree \(preserved\)/);
     assert.match(output, /git worktree remove --force/);
     assert.match(output, /git branch -D/);
-    assert.match(output, /Ignored files/);
+    // Inspection command must be HEAD/base-based (shows staged work) — plain
+    // `git diff` hides staged changes and a user could force-remove thinking
+    // the worktree is empty (openai#137 review finding).
+    assert.match(output, /diff .*--binary/);
+    assert.match(output, new RegExp(`diff ${session.baseCommit}`));
+    assert.match(output, /ignored/i);
     // No keep/discard CLI commands — leave-branch has no destructive action.
     assert.doesNotMatch(output, /--action (keep|discard)/);
+  } finally {
+    removeSession(session);
+  }
+});
+
+// Regression: rescue changes are STAGED (getWorktreeDiff/applyWorktreePatch run
+// git add -A). The rendered inspection command must be HEAD/base-based so it
+// shows staged work — plain `git diff` shows only unstaged and could read empty,
+// tricking the user into force-removing a worktree that holds real staged work
+// (openai#137 review finding). Assert the command references baseCommit, not a
+// bare `diff`.
+test("renderWorktreeTaskResult inspection command references baseCommit (staged-aware)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    const output = renderWorktreeTaskResult({ rendered: "" }, session, { stat: "", patch: "" });
+    // The bare `git diff` (unstaged-only) must NOT be the inspection command.
+    assert.doesNotMatch(output, /git -C [^\s]+ diff\b(?! )/);
+    // baseCommit must appear in a diff command (HEAD-based => shows staged).
+    assert.match(output, new RegExp(`diff ${session.baseCommit}`));
   } finally {
     removeSession(session);
   }

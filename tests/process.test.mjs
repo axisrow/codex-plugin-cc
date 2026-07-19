@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+import { terminateProcessTree, runCommand } from "../plugins/codex/scripts/lib/process.mjs";
 
 test("terminateProcessTree uses taskkill on Windows", () => {
   let captured = null;
@@ -83,4 +83,21 @@ test("terminateProcessTree recognizes a missing Windows process with localized o
   assert.equal(outcome.attempted, true);
   assert.equal(outcome.delivered, false);
   assert.equal(outcome.method, "taskkill");
+});
+
+// Regression: a child killed by a signal OR that failed to spawn returns
+// status:null from spawnSync. runCommand must NOT normalize that to status:0 —
+// callers checking status===0 would mistake a killed/missing git op (e.g. git
+// apply killed mid-run, or git missing) for success. For worktree patch capture/
+// apply that means false-success while the work holds un-captured changes.
+test("runCommand reports a signal-terminated child as failed (non-zero status)", () => {
+  const result = runCommand(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"]);
+  assert.ok(result.signal !== null, `expected a signal, got signal=${result.signal}`);
+  assert.notEqual(result.status, 0, `signal-terminated child must not report status 0, got ${result.status}`);
+});
+
+test("runCommand reports a spawn failure (ENOENT) as failed (non-zero status)", () => {
+  const result = runCommand("/nonexistent-codex-binary-xyz", []);
+  assert.ok(result.error, `expected an error, got ${result.error}`);
+  assert.notEqual(result.status, 0, `spawn failure must not report status 0, got ${result.status}`);
 });
