@@ -377,6 +377,21 @@ export function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
     if (!fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0) {
       return { applied: false, detail: "No tracked changes to apply." };
     }
+    // SECURITY (#15): a symlink created in the worktree (ln -s ~/.ssh/authorized_keys
+    // ./steal) is captured as a mode-120000 diff entry with the target verbatim.
+    // `git apply --index` would recreate the symlink in repoRoot pointing at the
+    // attacker-chosen host path → exfil/append primitive. git apply rejects literal
+    // "../" filename paths, but symlink-mode entries bypass that guard (the repo-side
+    // filename is normal; only the symlink target points outside). Reject the patch
+    // if any mode-120000 line appears. Leave-branch preserved: worktree stays for
+    // manual inspection.
+    const patchContent = fs.readFileSync(patchPath, "utf8");
+    if (/^(?:new file|deleted file|old|new) mode 120000$/m.test(patchContent)) {
+      return {
+        applied: false,
+        detail: `Worktree contains symlinks (mode 120000); patch not applied to prevent a host-file redirect via repoRoot. Inspect and copy them manually from ${worktreePath}.`
+      };
+    }
     const applyResult = git(repoRoot, ["apply", "--index", patchPath]);
     if (applyResult.status !== 0) {
       return { applied: false, detail: applyResult.stderr.trim() || "Patch apply failed (conflicts?)." };
