@@ -297,6 +297,79 @@ function buildAdversarialCollectionGuidance(options = {}) {
   return "The repository context below is a lightweight summary. Inspect the target diff yourself with read-only git commands before finalizing findings.";
 }
 
+// Worktree isolation for write-capable rescue (write-race fix, openai#135).
+// Ported from @peterdrier's openai/codex-plugin-cc#137, refactored to a
+// "leave-branch" cleanup model: the worktree is NEVER auto-removed by this library —
+// keep applies the tracked patch and leaves the worktree + branch for the user to
+// inspect and remove manually. The original capture-then-remove model had a deep
+// fail-open class (git add -A skips ignored files; dirty submodules and
+// binary content can't be fully captured; TOCTOU between snapshot and remove)
+// — removing the Destroy path removes the class by construction.
+
+export function createWorktree(repoRoot) {
+  const ts = Date.now();
+  const worktreesDir = path.join(repoRoot, ".worktrees");
+  fs.mkdirSync(worktreesDir, { recursive: true });
+
+  // Ensure .worktrees/ is excluded from the target repo without modifying tracked files.
+  // Use git rev-parse to resolve the real git dir (handles linked worktrees where .git is a file).
+  const rawGitDir = gitChecked(repoRoot, ["rev-parse", "--git-dir"]).stdout.trim();
+  const gitDir = path.resolve(repoRoot, rawGitDir);
+  const excludePath = path.join(gitDir, "info", "exclude");
+  const excludeContent = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
+  if (!excludeContent.includes(".worktrees")) {
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.appendFileSync(excludePath, `${excludeContent.endsWith("\n") || !excludeContent ? "" : "\n"}.worktrees/\n`);
+  }
+
+  const worktreePath = path.join(worktreesDir, `codex-${ts}`);
+  const branch = `codex/${ts}`;
+  const baseCommit = gitChecked(repoRoot, ["rev-parse", "HEAD"]).stdout.trim();
+  gitChecked(repoRoot, ["worktree", "add", worktreePath, "-b", branch]);
+  return { worktreePath, branch, repoRoot, baseCommit, timestamp: ts };
+}
+
+export function getWorktreeDiff(worktreePath, baseCommit) {
+  // gitChecked (not git): a failed snapshot must throw, not be misclassified as
+  // "no changes" — that was the fail-open root of the capture-then-remove bugs.
+  gitChecked(worktreePath, ["add", "-A"]);
+  const result = git(worktreePath, ["diff", "--cached", baseCommit, "--stat"]);
+  if (result.status !== 0) {
+    throw new Error(`Failed to diff worktree: ${result.stderr.trim()}`);
+  }
+  if (!result.stdout.trim()) {
+    return { stat: "", patch: "" };
+  }
+  const stat = result.stdout.trim();
+  const patchResult = gitChecked(worktreePath, ["diff", "--cached", baseCommit]);
+  return { stat, patch: patchResult.stdout };
+}
+
+export function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
+  const patchPath = path.join(
+    repoRoot,
+    ".codex-worktree-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".patch"
+  );
+  try {
+    // Byte-preserving: write the patch via `git diff --cached --binary --output`
+    // (git→file, never through a JS string). runCommand decodes stdout as UTF-8,
+    // which would replace invalid bytes (0xff, NUL, legacy encodings) with U+FFFD
+    // and apply a corrupted patch as "success". Detect empty via file size.
+    gitChecked(worktreePath, ["add", "-A"]);
+    gitChecked(worktreePath, ["diff", "--cached", "--binary", baseCommit, "--output", patchPath]);
+    if (!fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0) {
+      return { applied: false, detail: "No tracked changes to apply." };
+    }
+    const applyResult = git(repoRoot, ["apply", "--index", patchPath]);
+    if (applyResult.status !== 0) {
+      return { applied: false, detail: applyResult.stderr.trim() || "Patch apply failed (conflicts?)." };
+    }
+    return { applied: true, detail: "Tracked changes applied and staged." };
+  } finally {
+    fs.rmSync(patchPath, { force: true });
+  }
+}
+
 export function collectReviewContext(cwd, target, options = {}) {
   const repoRoot = getRepoRoot(cwd);
   const currentBranch = getCurrentBranch(repoRoot);
