@@ -333,3 +333,53 @@ test("renderWorktreeTaskResult inspection command references baseCommit (staged-
     removeSession(session);
   }
 });
+
+// SECURITY regression (#15): a symlink created in the worktree is captured as a
+// mode-120000 diff entry. Without the guard, `git apply --index` would recreate
+// the symlink in repoRoot pointing at an attacker-chosen host path → host-file
+// exfil/append. keep must detect mode 120000 in the patch and refuse to apply,
+// leaving the worktree in place.
+test("keep refuses to apply a patch containing a symlink (mode 120000) and preserves the worktree", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    // Plant a symlink in the worktree pointing at an absolute host path.
+    fs.symlinkSync("/etc/passwd", path.join(session.worktreePath, "steal"));
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, false);
+    assert.match(result.detail, /symlinks/i);
+    // The symlink must NOT have been recreated in repoRoot.
+    assert.equal(fs.existsSync(path.join(repoRoot, "steal")), false, "symlink not replayed into repoRoot");
+    // Worktree preserved (leave-branch).
+    assert.equal(result.preserved, true);
+  } finally {
+    removeSession(session);
+  }
+});
+
+// SECURITY regression (#15, false-positive guard): a regular file whose CONTENT
+// happens to contain the literal "mode 120000" string (e.g. documentation of git
+// modes) must NOT trip the symlink guard. Only real diff mode headers
+// ("new file mode 120000" etc.) are symlinks. The regex matches line-anchored
+// mode headers, not arbitrary content.
+test("keep applies a regular file whose content literally mentions mode 120000 (no false positive)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.writeFileSync(
+      path.join(session.worktreePath, "modes.md"),
+      'Git emits "new file mode 120000" for symlinks.\n'
+    );
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, true, "regular file applied despite the literal mode string in content");
+    assert.match(fs.readFileSync(path.join(repoRoot, "modes.md"), "utf8"), /mode 120000/);
+  } finally {
+    removeSession(session);
+  }
+});
