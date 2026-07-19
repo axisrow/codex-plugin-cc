@@ -288,6 +288,31 @@ test("renderWorktreeTaskResult renders the manual-remove instructions (no destru
   }
 });
 
+// SECURITY regression (#14): a symlink at `.worktrees` must NOT be followed.
+// Without the guard, recursive mkdirSync follows the symlink and `git worktree add`
+// populates the symlink target — a crafted repo (or a prior malicious run) could
+// redirect the Codex workspace-write root into ~/.ssh / ~/.config / etc.
+test("createWorktreeSession refuses a symlink at .worktrees (no host-location redirect)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const attackerDest = makeTempDir("worktree-attack-dest-");
+
+  // Plant the hostile symlink: .worktrees -> attackerDest (outside repoRoot).
+  fs.symlinkSync(attackerDest, path.join(repoRoot, ".worktrees"));
+
+  assert.throws(
+    () => createWorktreeSession(repoRoot),
+    /symlink/i,
+    "must refuse when .worktrees is a symlink"
+  );
+
+  // The attacker's destination must NOT have been populated.
+  assert.deepEqual(
+    fs.readdirSync(attackerDest),
+    [],
+    "attacker destination must remain empty (no worktree written through the symlink)"
+  );
+});
+
 // Regression: rescue changes are STAGED (getWorktreeDiff/applyWorktreePatch run
 // git add -A). The rendered inspection command must be HEAD/base-based so it
 // shows staged work — plain `git diff` shows only unstaged and could read empty,
