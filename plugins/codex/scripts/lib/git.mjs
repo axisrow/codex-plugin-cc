@@ -309,7 +309,24 @@ function buildAdversarialCollectionGuidance(options = {}) {
 export function createWorktree(repoRoot) {
   const ts = Date.now();
   const worktreesDir = path.join(repoRoot, ".worktrees");
+  // SECURITY (#14): if `.worktrees` already exists as a symlink, Node's recursive
+  // mkdirSync follows it and `git worktree add` would populate the symlink TARGET —
+  // a crafted repo (or a prior malicious run that did `ln -s ~/.config .worktrees`)
+  // would redirect the Codex workspace-write root into ~/.ssh, ~/.config, etc.
+  // Refuse any symlink at .worktrees, and verify the resolved path stays inside the repo.
+  if (fs.existsSync(worktreesDir) && fs.lstatSync(worktreesDir).isSymbolicLink()) {
+    throw new Error(
+      `Refusing to create worktree: ${worktreesDir} is a symlink (possible sandbox-escape attempt). Remove it manually if expected.`
+    );
+  }
   fs.mkdirSync(worktreesDir, { recursive: true });
+  const realRepoRoot = fs.realpathSync(repoRoot);
+  const realWorktreesDir = fs.realpathSync(worktreesDir);
+  if (realWorktreesDir !== realRepoRoot && !realWorktreesDir.startsWith(realRepoRoot + path.sep)) {
+    throw new Error(
+      `Refusing to create worktree: ${worktreesDir} resolves outside the repository (to ${realWorktreesDir}).`
+    );
+  }
 
   // Ensure .worktrees/ is excluded from the target repo without modifying tracked files.
   // Use git rev-parse to resolve the real git dir (handles linked worktrees where .git is a file).
