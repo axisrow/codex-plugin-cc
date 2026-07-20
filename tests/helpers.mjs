@@ -20,6 +20,13 @@ export function makeTempDir(prefix = "codex-plugin-test-") {
   return dir;
 }
 
+// Strip CLAUDE_PLUGIN_DATA from the test process env so tests don't inherit the
+// host's real plugin data dir. Without this, tests running inside a Claude Code
+// session fall because resolveStateDir resolves to the live plugin dir instead
+// of the temp fallback. buildEnv in fake-codex-fixture.mjs sets its own
+// ephemeral value for spawned subprocesses; this covers in-process reads.
+delete process.env.CLAUDE_PLUGIN_DATA;
+
 export function writeExecutable(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
 }
