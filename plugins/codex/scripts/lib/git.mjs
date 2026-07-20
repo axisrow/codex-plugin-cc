@@ -370,29 +370,32 @@ export function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
   try {
     // Byte-preserving: write the patch via `git diff --cached --binary --output`
     // (git→file, never through a JS string). runCommand decodes stdout as UTF-8,
-    // which would replace invalid bytes (0xff, NUL, legacy encodings) with U+FFFD
-    // and apply a corrupted patch as "success". Detect empty via file size.
+    // which would replace invalid bytes (0xff, NUL, legacy encodings) with U+FFFD.
+    // --no-ext-diff/--no-textconv pin diff to built-in behavior so a poisoned
+    // diff.external driver (writable via the linked-worktree shared commondir)
+    // cannot affect patch generation.
     gitChecked(worktreePath, ["add", "-A"]);
-    gitChecked(worktreePath, ["diff", "--cached", "--binary", baseCommit, "--output", patchPath]);
+    gitChecked(worktreePath, [
+      "diff", "--no-ext-diff", "--no-textconv", "--binary", "--cached", baseCommit, "--output", patchPath
+    ]);
     if (!fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0) {
       return { applied: false, detail: "No tracked changes to apply." };
     }
-    // SECURITY (#15): a symlink created in the worktree (ln -s ~/.ssh/authorized_keys
-    // ./steal) is captured as a mode-120000 diff entry with the target verbatim.
-    // `git apply --index` would recreate the symlink in repoRoot pointing at the
-    // attacker-chosen host path → exfil/append primitive. git apply rejects literal
-    // "../" filename paths, but symlink-mode entries bypass that guard (the repo-side
-    // filename is normal; only the symlink target points outside). Reject the patch
-    // if any mode-120000 line appears. Leave-branch preserved: worktree stays for
-    // manual inspection.
-    const patchContent = fs.readFileSync(patchPath, "utf8");
-    if (/^(?:new file|deleted file|old|new) mode 120000$/m.test(patchContent)) {
-      return {
-        applied: false,
-        detail: `Worktree contains symlinks (mode 120000); patch not applied to prevent a host-file redirect via repoRoot. Inspect and copy them manually from ${worktreePath}.`
-      };
-    }
-    const applyResult = git(repoRoot, ["apply", "--index", patchPath]);
+    // SECURITY (#15, redesign — neutralize, not detect): a symlink created or
+    // retargeted in the worktree would be replayed by `git apply` into repoRoot
+    // pointing at an attacker-chosen host path → exfil/append primitive. Four
+    // cycles of DETECTION (patch-text scan, --raw, frozen-tree) each found a new
+    // TOCTOU/mutable-indirection bypass (index, refs/replace, …). git has too many
+    // layers of mutable object resolution to make two-phase detection airtight.
+    //
+    // Instead, NEUTRALIZE: apply with `core.symlinks=false`. git then materializes
+    // any symlink-mode entry as a regular text file containing the target path,
+    // NOT as a symlink — it cannot point at a host file, cannot exfil, cannot
+    // append. The symlink-replay class disappears by construction, with no
+    // detection race to win. Legitimate symlinks in the worktree also land as
+    // text files (rare in code; the render layer already warns to inspect
+    // special files manually).
+    const applyResult = git(repoRoot, ["-c", "core.symlinks=false", "apply", "--index", patchPath]);
     if (applyResult.status !== 0) {
       return { applied: false, detail: applyResult.stderr.trim() || "Patch apply failed (conflicts?)." };
     }
