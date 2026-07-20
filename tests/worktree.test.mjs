@@ -415,3 +415,29 @@ test("keep applies a retargeted existing symlink as a regular file (no host redi
     removeSession(session);
   }
 });
+
+// SECURITY regression (#16): if git rev-parse --git-dir returns a path OUTSIDE
+// repoRoot (separate-git-dir, crafted .git gitfile), createWorktree must refuse
+// rather than write info/exclude at the attacker-controlled location.
+test("createWorktreeSession refuses a git-dir outside repoRoot", () => {
+  const repoRoot = makeTempDir();
+  const externalGitDir = makeTempDir("external-gitdir-");
+  run("git", ["init", "-q", "-b", "main", `--separate-git-dir=${externalGitDir}`, repoRoot]);
+  run("git", ["config", "user.name", "Test"], { cwd: repoRoot });
+  run("git", ["config", "user.email", "test@test"], { cwd: repoRoot });
+  fs.writeFileSync(path.join(repoRoot, "app.js"), "export const v = 1;\n");
+  run("git", ["add", "app.js"], { cwd: repoRoot });
+  run("git", ["commit", "-q", "-m", "init"], { cwd: repoRoot });
+
+  assert.throws(
+    () => createWorktreeSession(repoRoot),
+    /outside the repository/i,
+    "must refuse when git-dir resolves outside repoRoot"
+  );
+
+  const excludePath = path.join(externalGitDir, "info", "exclude");
+  if (fs.existsSync(excludePath)) {
+    const content = fs.readFileSync(excludePath, "utf8");
+    assert.doesNotMatch(content, /\.worktrees/, "external exclude must not contain .worktrees");
+  }
+});

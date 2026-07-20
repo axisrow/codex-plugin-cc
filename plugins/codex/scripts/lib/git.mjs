@@ -332,6 +332,18 @@ export function createWorktree(repoRoot) {
   // Use git rev-parse to resolve the real git dir (handles linked worktrees where .git is a file).
   const rawGitDir = gitChecked(repoRoot, ["rev-parse", "--git-dir"]).stdout.trim();
   const gitDir = path.resolve(repoRoot, rawGitDir);
+  // SECURITY (#16): if --git-dir returns an absolute path OUTSIDE repoRoot (via a
+  // crafted .git gitfile, --separate-git-dir, or core.worktree manipulation),
+  // path.resolve would swallow it and the info/exclude write below would land at
+  // an attacker-controlled location. Reject any gitDir that isn't contained in
+  // repoRoot (realpath-normalized on both sides). A legit linked worktree's gitdir
+  // lives inside the main repo's .git/ and passes this check.
+  const realGitDir = fs.realpathSync(gitDir);
+  if (realGitDir !== realRepoRoot && !realGitDir.startsWith(realRepoRoot + path.sep)) {
+    throw new Error(
+      `Refusing to create worktree: git dir ${realGitDir} resolves outside the repository (${realRepoRoot}). Worktree isolation requires the git dir inside the repo.`
+    );
+  }
   const excludePath = path.join(gitDir, "info", "exclude");
   const excludeContent = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
   if (!excludeContent.includes(".worktrees")) {
