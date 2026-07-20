@@ -133,6 +133,12 @@ function normalizeReasoningEffort(effort) {
   return normalized;
 }
 
+function announceRun(model, effort) {
+  const m = model ?? "default";
+  const e = effort ?? "default";
+  process.stderr.write(`Codex: model=${m} effort=${e}\n`);
+}
+
 function normalizeArgv(argv) {
   if (argv.length === 1) {
     const [raw] = argv;
@@ -765,6 +771,7 @@ async function handleReviewCommand(argv, config) {
   const focusText = positionals.join(" ").trim();
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
+  announceRun(model, effort);
   const target = resolveReviewTarget(cwd, {
     base: options.base,
     scope: options.scope
@@ -817,6 +824,7 @@ async function handleTask(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
+  announceRun(model, effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
