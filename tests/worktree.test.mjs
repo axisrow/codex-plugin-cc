@@ -415,3 +415,51 @@ test("keep applies a retargeted existing symlink as a regular file (no host redi
     removeSession(session);
   }
 });
+
+// SECURITY regression (#16, redesign — eliminate info/exclude write): createWorktree
+// no longer writes to <gitDir>/info/exclude. The #16 vulnerability (git-dir outside
+// repoRoot → exclude write at attacker location) is eliminated by not writing to
+// git-dir metadata. A separate-git-dir repo (previously the attack case) now works.
+test("createWorktreeSession works with separate-git-dir (no info/exclude write)", () => {
+  const repoRoot = makeTempDir();
+  const externalGitDir = makeTempDir("external-gitdir-");
+  run("git", ["init", "-q", "-b", "main", `--separate-git-dir=${externalGitDir}`, repoRoot]);
+  run("git", ["config", "user.name", "Test"], { cwd: repoRoot });
+  run("git", ["config", "user.email", "test@test"], { cwd: repoRoot });
+  fs.writeFileSync(path.join(repoRoot, "app.js"), "export const v = 1;\n");
+  run("git", ["add", "app.js"], { cwd: repoRoot });
+  run("git", ["commit", "-q", "-m", "init"], { cwd: repoRoot });
+
+  const session = createWorktreeSession(repoRoot);
+  try {
+    assert.ok(session.worktreePath);
+    assert.match(session.branch, /^codex\/\d+$/);
+    const excludePath = path.join(externalGitDir, "info", "exclude");
+    if (fs.existsSync(excludePath)) {
+      assert.doesNotMatch(
+        fs.readFileSync(excludePath, "utf8"),
+        /\.worktrees/,
+        "external info/exclude must not contain .worktrees (no git-dir write)"
+      );
+    }
+  } finally {
+    removeSession(session);
+  }
+});
+
+// Regression: linked worktree (gitdir in main .git/) works — no git-dir metadata
+// write means no boundary check needed, no legit-layout breakage.
+test("createWorktreeSession works from a linked worktree", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const linkedWt = makeTempDir("linked-wt-");
+  assert.equal(run("git", ["worktree", "add", linkedWt, "-b", "linked"], { cwd: repoRoot }).status, 0);
+
+  const session = createWorktreeSession(linkedWt);
+  try {
+    assert.ok(session.worktreePath);
+    assert.match(session.branch, /^codex\/\d+$/);
+  } finally {
+    removeSession(session);
+    run("git", ["worktree", "remove", "--force", linkedWt], { cwd: repoRoot });
+  }
+});

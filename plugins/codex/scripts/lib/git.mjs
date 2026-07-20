@@ -328,15 +328,31 @@ export function createWorktree(repoRoot) {
     );
   }
 
-  // Ensure .worktrees/ is excluded from the target repo without modifying tracked files.
-  // Use git rev-parse to resolve the real git dir (handles linked worktrees where .git is a file).
-  const rawGitDir = gitChecked(repoRoot, ["rev-parse", "--git-dir"]).stdout.trim();
-  const gitDir = path.resolve(repoRoot, rawGitDir);
-  const excludePath = path.join(gitDir, "info", "exclude");
-  const excludeContent = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
-  if (!excludeContent.includes(".worktrees")) {
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    fs.appendFileSync(excludePath, `${excludeContent.endsWith("\n") || !excludeContent ? "" : "\n"}.worktrees/\n`);
+  // SECURITY (#16, redesign — eliminate, not detect): the original code wrote
+  // `.worktrees/` into <gitDir>/info/exclude to keep the worktree dir out of
+  // `git status`. That write was the entire #16 vulnerability: if gitDir resolved
+  // outside repoRoot (separate-git-dir, crafted .git gitfile, linked worktree),
+  // the exclude write landed at an attacker-controlled location. Detection-based
+  // fixes (boundary checks) broke legit linked worktrees and couldn't distinguish
+  // them from attack — git introspection can't authenticate external common-dirs.
+  //
+  // Eliminate the write entirely: git worktree add works WITHOUT the exclude
+  // (it was cosmetic, added in openai#137 commit 4bca062). Instead, keep
+  // `.worktrees/` out of git status via an in-repo `.worktrees/.gitignore`
+  // containing `*`, written inside the already-validated worktreesDir (#14 guard
+  // ensures it's inside repoRoot and not a symlink). No git-dir metadata write.
+  const dotGitignore = path.join(worktreesDir, ".gitignore");
+  // SECURITY: if .gitignore already exists as a symlink (crafted repo ships it as
+  // a dangling symlink to an external path), existsSync follows it and returns
+  // false, then writeFileSync would create a file at the symlink target outside
+  // repoRoot. lstat (not stat/existsSync) detects the symlink itself.
+  if (fs.existsSync(dotGitignore) && fs.lstatSync(dotGitignore).isSymbolicLink()) {
+    throw new Error(
+      `Refusing to create worktree: ${dotGitignore} is a symlink (possible redirect attempt). Remove it manually if expected.`
+    );
+  }
+  if (!fs.existsSync(dotGitignore)) {
+    fs.writeFileSync(dotGitignore, "*\n", "utf8");
   }
 
   const worktreePath = path.join(worktreesDir, `codex-${ts}`);
