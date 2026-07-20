@@ -68,6 +68,12 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const TASK_WORKER_RECORD_WAIT_TIMEOUT_MS = 1000;
+// Foreground runs are invoked by Claude Code's Bash tool, which SIGKILLs node
+// at its own timeout (default 120000ms) and returns nothing. Set the runtime
+// turn budget just below that so a stalled foreground turn fails fast with a
+// structured error instead of being killed with an empty result.
+// Ported from @russjhammond's openai/codex-plugin-cc#376.
+const FOREGROUND_TURN_TIMEOUT_MS = 110000;
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const VALID_REASONING_EFFORTS = new Set(REASONING_EFFORTS);
 const MODEL_ALIASES = new Map([
@@ -688,6 +694,21 @@ async function executeTransfer(cwd, options = {}) {
   };
 }
 
+// Set the per-turn budget for a FOREGROUND command (codex.mjs reads
+// CODEX_TURN_TIMEOUT_MS at call time). Precedence: explicit --turn-timeout-ms
+// flag > a pre-set CODEX_TURN_TIMEOUT_MS env > the foreground default just
+// under the host Bash ceiling. Only call on foreground path: a detached
+// background worker inherits the parent env, so capping here would shrink
+// the background budget too. Ported from openai#376.
+function applyForegroundTurnBudget(options) {
+  const explicit = Number(options["turn-timeout-ms"]);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    process.env.CODEX_TURN_TIMEOUT_MS = String(explicit);
+  } else if (!process.env.CODEX_TURN_TIMEOUT_MS) {
+    process.env.CODEX_TURN_TIMEOUT_MS = String(FOREGROUND_TURN_TIMEOUT_MS);
+  }
+}
+
 function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
@@ -759,7 +780,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "effort", "cwd"],
+    valueOptions: ["base", "scope", "model", "effort", "cwd", "turn-timeout-ms"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -787,6 +808,9 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
+  if (!options.background) {
+    applyForegroundTurnBudget(options);
+  }
   await runForegroundCommand(
     job,
     (progress) =>
@@ -813,7 +837,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "turn-timeout-ms"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
@@ -858,6 +882,7 @@ async function handleTask(argv) {
   }
 
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  applyForegroundTurnBudget(options);
   await runForegroundCommand(
     job,
     (progress) =>
