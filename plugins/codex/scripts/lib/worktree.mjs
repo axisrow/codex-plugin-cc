@@ -16,6 +16,9 @@
 // `git worktree remove --force <path> && git branch -D <branch>` per rescue —
 // acceptable for a rare, high-stakes operation whose whole point is write-safety.
 
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   createWorktree,
   getWorktreeDiff,
@@ -25,6 +28,32 @@ import {
 
 export function createWorktreeSession(cwd) {
   const repoRoot = ensureGitRepository(cwd);
+  // Warn (not fail) when worktrees accumulate — leave-branch never auto-removes,
+  // so repeated rescue calls add .worktrees/codex-<ts>/ + branches indefinitely.
+  // Threshold configurable via CODEX_WORKTREE_WARN_THRESHOLD (default 10).
+  const worktreesDir = path.join(repoRoot, ".worktrees");
+  const rawThreshold = process.env.CODEX_WORKTREE_WARN_THRESHOLD;
+  const threshold = rawThreshold !== undefined && Number.isFinite(Number(rawThreshold))
+    ? Number(rawThreshold)
+    : 10;
+  try {
+    // SECURITY: lstat before readdirSync — if .worktrees is a symlink (crafted
+    // repo), readdirSync would follow it and enumerate a host/network dir before
+    // the #14 guard in createWorktree catches it. Skip the count if symlinked.
+    if (fs.existsSync(worktreesDir) && !fs.lstatSync(worktreesDir).isSymbolicLink()) {
+      const existing = fs.readdirSync(worktreesDir).filter((name) => name.startsWith("codex-"));
+      if (existing.length >= threshold) {
+        process.stderr.write(
+          `[codex] Warning: ${existing.length} rescue worktrees exist in ${worktreesDir}. ` +
+            `Remove the ones you no longer need:\n` +
+            `  git worktree remove --force <path> && git branch -D <branch>\n` +
+            `Or raise the threshold via CODEX_WORKTREE_WARN_THRESHOLD.\n`
+        );
+      }
+    }
+  } catch {
+    // .worktrees doesn't exist yet, or unreadable — first run, no accumulation.
+  }
   return createWorktree(repoRoot);
 }
 

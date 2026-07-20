@@ -463,3 +463,39 @@ test("createWorktreeSession works from a linked worktree", () => {
     run("git", ["worktree", "remove", "--force", linkedWt], { cwd: repoRoot });
   }
 });
+
+// Regression (#17): leave-branch never removes worktrees, so they accumulate.
+// At a threshold (default 10, configurable via CODEX_WORKTREE_WARN_THRESHOLD),
+// createWorktreeSession must warn on stderr with cleanup instructions. Not fail.
+test("createWorktreeSession warns when worktree count exceeds threshold", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  const sessions = [];
+  const threshold = 3;
+  const originalThreshold = process.env.CODEX_WORKTREE_WARN_THRESHOLD;
+  process.env.CODEX_WORKTREE_WARN_THRESHOLD = String(threshold);
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let warned = false;
+  process.stderr.write = (chunk) => {
+    if (typeof chunk === "string" && chunk.includes("rescue worktrees exist")) {
+      warned = true;
+    }
+    return true;
+  };
+
+  try {
+    for (let i = 0; i <= threshold; i++) {
+      sessions.push(createWorktreeSession(repoRoot));
+    }
+    assert.equal(warned, true, "must warn when count >= threshold");
+  } finally {
+    process.stderr.write = originalWrite;
+    if (originalThreshold === undefined) {
+      delete process.env.CODEX_WORKTREE_WARN_THRESHOLD;
+    } else {
+      process.env.CODEX_WORKTREE_WARN_THRESHOLD = originalThreshold;
+    }
+    for (const s of sessions) {
+      removeSession(s);
+    }
+  }
+});
