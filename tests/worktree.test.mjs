@@ -334,38 +334,39 @@ test("renderWorktreeTaskResult inspection command references baseCommit (staged-
   }
 });
 
-// SECURITY regression (#15): a symlink created in the worktree is captured as a
-// mode-120000 diff entry. Without the guard, `git apply --index` would recreate
-// the symlink in repoRoot pointing at an attacker-chosen host path → host-file
-// exfil/append. keep must detect mode 120000 in the patch and refuse to apply,
-// leaving the worktree in place.
-test("keep refuses to apply a patch containing a symlink (mode 120000) and preserves the worktree", () => {
+// SECURITY regression (#15, neutralize redesign): a symlink created in the
+// worktree is applied with `core.symlinks=false`, so git materializes it as a
+// REGULAR TEXT FILE containing the target path — NOT as a symlink. It cannot
+// point at a host file, cannot exfil, cannot append. Four cycles of detection
+// (patch-text scan, --raw, frozen-tree) each found a new TOCTOU bypass; the
+// neutralize approach removes the symlink-replay class by construction.
+test("keep applies a worktree symlink as a regular file (core.symlinks=false neutralize), not a host redirect", () => {
   const { repoRoot } = createRepoWithInitialCommit();
   const session = createWorktreeSession(repoRoot);
 
   try {
-    // Plant a symlink in the worktree pointing at an absolute host path.
     fs.symlinkSync("/etc/passwd", path.join(session.worktreePath, "steal"));
 
     const result = cleanupWorktreeSession(session, { keep: true });
 
-    assert.equal(result.applied, false);
-    assert.match(result.detail, /symlinks/i);
-    // The symlink must NOT have been recreated in repoRoot.
-    assert.equal(fs.existsSync(path.join(repoRoot, "steal")), false, "symlink not replayed into repoRoot");
-    // Worktree preserved (leave-branch).
-    assert.equal(result.preserved, true);
+    assert.equal(result.applied, true);
+    // The entry MUST exist as a regular file, NOT a symlink.
+    const target = path.join(repoRoot, "steal");
+    const st = fs.lstatSync(target);
+    assert.equal(st.isFile(), true, "symlink applied as a regular file, not a symlink");
+    assert.equal(st.isSymbolicLink(), false, "no host-file symlink created in repoRoot");
+    // Content is the defused target path as text.
+    assert.equal(fs.readFileSync(target, "utf8"), "/etc/passwd");
   } finally {
     removeSession(session);
   }
 });
 
-// SECURITY regression (#15, false-positive guard): a regular file whose CONTENT
-// happens to contain the literal "mode 120000" string (e.g. documentation of git
-// modes) must NOT trip the symlink guard. Only real diff mode headers
-// ("new file mode 120000" etc.) are symlinks. The regex matches line-anchored
-// mode headers, not arbitrary content.
-test("keep applies a regular file whose content literally mentions mode 120000 (no false positive)", () => {
+// SECURITY regression (#15, false-positive was a detection artifact — under
+// neutralize there is nothing to false-positive on). A regular file whose
+// content happens to mention "mode 120000" applies normally (it always did;
+// this test now just confirms the redesign didn't regress ordinary applies).
+test("keep applies a regular file whose content literally mentions mode 120000", () => {
   const { repoRoot } = createRepoWithInitialCommit();
   const session = createWorktreeSession(repoRoot);
 
@@ -377,8 +378,39 @@ test("keep applies a regular file whose content literally mentions mode 120000 (
 
     const result = cleanupWorktreeSession(session, { keep: true });
 
-    assert.equal(result.applied, true, "regular file applied despite the literal mode string in content");
+    assert.equal(result.applied, true);
     assert.match(fs.readFileSync(path.join(repoRoot, "modes.md"), "utf8"), /mode 120000/);
+  } finally {
+    removeSession(session);
+  }
+});
+
+// SECURITY regression (#15 reopen): an existing tracked symlink that Codex
+// RETARGETS. Under neutralize (core.symlinks=false apply), the retarget is
+// applied but the result in repoRoot is a regular file with the new target as
+// text — the host-pointing symlink is NOT created. (Pre-neutralize this was the
+// bypass that broke #19's regex; frozen-tree closed the TOCTOU but not the
+// replace-ref vector. Neutralize closes the class.)
+test("keep applies a retargeted existing symlink as a regular file (no host redirect)", () => {
+  const { repoRoot } = createRepoWithInitialCommit();
+  fs.symlinkSync("/tmp/codex-benign-target", path.join(repoRoot, "existing_link"));
+  assert.equal(run("git", ["add", "existing_link"], { cwd: repoRoot }).status, 0);
+  assert.equal(run("git", ["commit", "-m", "add benign symlink"], { cwd: repoRoot }).status, 0);
+
+  const session = createWorktreeSession(repoRoot);
+
+  try {
+    fs.rmSync(path.join(session.worktreePath, "existing_link"));
+    fs.symlinkSync("/etc/passwd", path.join(session.worktreePath, "existing_link"));
+
+    const result = cleanupWorktreeSession(session, { keep: true });
+
+    assert.equal(result.applied, true);
+    const target = path.join(repoRoot, "existing_link");
+    const st = fs.lstatSync(target);
+    assert.equal(st.isSymbolicLink(), false, "no host-pointing symlink in repoRoot");
+    assert.equal(st.isFile(), true, "retarget applied as a regular file");
+    assert.equal(fs.readFileSync(target, "utf8"), "/etc/passwd");
   } finally {
     removeSession(session);
   }
