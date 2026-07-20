@@ -74,6 +74,8 @@ const TASK_WORKER_RECORD_WAIT_TIMEOUT_MS = 1000;
 // structured error instead of being killed with an empty result.
 // Ported from @russjhammond's openai/codex-plugin-cc#376.
 const FOREGROUND_TURN_TIMEOUT_MS = 110000;
+// Background runs have no external Bash ceiling — give them the full default budget.
+const DEFAULT_TURN_TIMEOUT_MS = 600000;
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const VALID_REASONING_EFFORTS = new Set(REASONING_EFFORTS);
 const MODEL_ALIASES = new Map([
@@ -419,6 +421,7 @@ async function executeReviewRun(request) {
       target: reviewTarget,
       model: request.model,
       effort: request.effort,
+      turnTimeoutMs: request.turnTimeoutMs,
       onProgress: request.onProgress
     });
     const payload = {
@@ -544,6 +547,7 @@ async function executeTaskRun(request) {
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
     persistThread: true,
+    turnTimeoutMs: request.turnTimeoutMs,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
 
@@ -655,7 +659,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId, turnTimeoutMs }) {
   return {
     cwd,
     model,
@@ -663,7 +667,8 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
     prompt,
     write,
     resumeLast,
-    jobId
+    jobId,
+    turnTimeoutMs
   };
 }
 
@@ -694,19 +699,21 @@ async function executeTransfer(cwd, options = {}) {
   };
 }
 
-// Set the per-turn budget for a FOREGROUND command (codex.mjs reads
-// CODEX_TURN_TIMEOUT_MS at call time). Precedence: explicit --turn-timeout-ms
-// flag > a pre-set CODEX_TURN_TIMEOUT_MS env > the foreground default just
-// under the host Bash ceiling. Only call on foreground path: a detached
-// background worker inherits the parent env, so capping here would shrink
-// the background budget too. Ported from openai#376.
-function applyForegroundTurnBudget(options) {
+// Resolve the per-turn timeout from CLI options. Precedence:
+//   --turn-timeout-ms flag > CODEX_TURN_TIMEOUT_MS env > foreground/background default.
+// Foreground default is just under the Bash-tool ceiling (110s) so a stalled turn
+// returns a structured error instead of being SIGKILLed. Background gets the full
+// 600s default (no external ceiling to collide with).
+function resolveTurnTimeoutMsFromOptions(options) {
   const explicit = Number(options["turn-timeout-ms"]);
   if (Number.isFinite(explicit) && explicit > 0) {
-    process.env.CODEX_TURN_TIMEOUT_MS = String(explicit);
-  } else if (!process.env.CODEX_TURN_TIMEOUT_MS) {
-    process.env.CODEX_TURN_TIMEOUT_MS = String(FOREGROUND_TURN_TIMEOUT_MS);
+    return explicit;
   }
+  const fromEnv = Number(process.env.CODEX_TURN_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return options.background ? DEFAULT_TURN_TIMEOUT_MS : FOREGROUND_TURN_TIMEOUT_MS;
 }
 
 function readTaskPrompt(cwd, options, positionals) {
@@ -808,9 +815,6 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
-  if (!options.background) {
-    applyForegroundTurnBudget(options);
-  }
   await runForegroundCommand(
     job,
     (progress) =>
@@ -822,6 +826,7 @@ async function handleReviewCommand(argv, config) {
         effort,
         focusText,
         reviewName: config.reviewName,
+        turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
         onProgress: progress
       }),
     { json: options.json }
@@ -874,7 +879,8 @@ async function handleTask(argv) {
       prompt,
       write,
       resumeLast,
-      jobId: job.id
+      jobId: job.id,
+      turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options)
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -882,7 +888,6 @@ async function handleTask(argv) {
   }
 
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-  applyForegroundTurnBudget(options);
   await runForegroundCommand(
     job,
     (progress) =>
@@ -894,6 +899,7 @@ async function handleTask(argv) {
         write,
         resumeLast,
         jobId: job.id,
+        turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
         onProgress: progress
       }),
     { json: options.json }

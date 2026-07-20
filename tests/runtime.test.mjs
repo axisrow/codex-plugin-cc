@@ -3029,3 +3029,25 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
     input: JSON.stringify({ hook_event_name: "SessionEnd", cwd: targetWorkspace })
   });
 });
+
+test("task with stalled turn/start times out via --turn-timeout-ms instead of hanging forever", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-turn-start");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // 3s timeout — must reject within that, not hang forever.
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "3000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  // Must NOT hang — exit with a timeout error.
+  assert.notEqual(result.status, 0, "must exit non-zero on timeout, not hang");
+  assert.match(result.stderr, /turn budget/i, "error must mention the turn budget");
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "failed", "job must be marked failed");
+});
