@@ -630,12 +630,10 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     //      previously-dead rejectCompletion to the client exit so an app-server
     //      death AFTER startRequest resolved rejects the await immediately.
     //   2. deadline — hard per-turn budget (resolveTurnTimeoutMs).
-    let exitRaceSettled = false;
     client.exitPromise.then(() => {
-      if (exitRaceSettled || state.completed) {
+      if (state.completed) {
         return;
       }
-      exitRaceSettled = true;
       state.rejectCompletion(
         client.exitError ?? new Error("codex app-server exited before the turn completed.")
       );
