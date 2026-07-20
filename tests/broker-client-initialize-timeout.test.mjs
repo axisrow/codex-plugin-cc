@@ -5,7 +5,7 @@ import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mj
 import { withAppServer } from "../plugins/codex/scripts/lib/codex.mjs";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { makeTempDir } from "./helpers.mjs";
-import { spawnWedgedServer } from "./broker-controller-helpers.mjs";
+import { spawnBusyBroker, spawnWedgedServer } from "./broker-controller-helpers.mjs";
 
 // Reproduces fork #29 / upstream openai#509: when the shared broker is wedged
 // (busy with a long-running request and never reaching the second socket), the
@@ -80,5 +80,48 @@ test("withAppServer falls back to a direct app-server when the broker wedges (#2
     assert.equal(result.transport, "direct", "the operation must run on the direct transport after fallback");
   } finally {
     wedged.cleanup();
+  }
+});
+
+// Drives the post-handshake busy fallback: the broker accepts initialize, then
+// returns BROKER_BUSY_RPC_CODE (-32001) for the operation's first request.
+// withAppServer must fall back to a direct app-server. Codex review of PR #32
+// caught that collapsing the OR-chain onto error.transport broke this path
+// (transport is tagged only on handshake failure, not on post-handshake busy).
+test("withAppServer falls back to a direct app-server on broker/busy after a successful handshake (#32)", async () => {
+  const busy = await spawnBusyBroker();
+  const cwd = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const env = buildEnv(binDir);
+
+  let calls = 0;
+  try {
+    const result = await Promise.race([
+      withAppServer(
+        cwd,
+        async (client) => {
+          calls += 1;
+          // Any real RPC: on the broker client this hits broker/busy (-32001)
+          // and must trigger the direct fallback; on the direct client it
+          // resolves normally via the fake-codex app-server.
+          await client.request("account/read", {});
+          return { transport: client.transport };
+        },
+        {
+          brokerEndpoint: `unix:${busy.socketPath}`,
+          env
+        }
+      ),
+      new Promise((resolve) => setTimeout(() => resolve({ HANG: true }), 5000))
+    ]);
+
+    assert.ok(!result.HANG, "withAppServer hung instead of falling back to direct on broker/busy");
+    // The broker attempt hits -32001, withAppServer retries on direct — so fn
+    // runs at least once on the broker (which fails) and succeeds on direct.
+    assert.ok(calls >= 1, "the operation must run via the direct fallback after broker/busy");
+    assert.equal(result.transport, "direct", "the operation must complete on the direct transport after a busy broker");
+  } finally {
+    busy.cleanup();
   }
 });

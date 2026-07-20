@@ -688,11 +688,14 @@ export async function withAppServer(cwd, fn, clientOptions = {}) {
     return result;
   } catch (error) {
     // Fall back to a direct (non-broker) app-server when the broker transport
-    // is unusable: either it is busy with another in-flight request (-32001),
-    // or it failed fatally during the handshake (timeout / ENOENT /
-    // ECONNREFUSED — tagged brokerFatal in CodexAppServerClient.connect).
+    // is unusable. Two distinct shapes:
+    //  - broker/busy (-32001) arrives AFTER a successful handshake, while
+    //    `client` is assigned — read the transport off the client.
+    //  - a handshake failure (timeout / ENOENT / ECONNREFUSED) rejects inside
+    //    connect() before `client` is assigned — tagged brokerFatal in
+    //    CodexAppServerClient.connect.
     const shouldRetryDirect =
-      (error?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
       error?.brokerFatal === true;
 
     if (client) {
