@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
@@ -191,5 +192,42 @@ export async function spawnInProcessBroker({ appClient, idleTimeoutMs = 0, endpo
     pidFile: resolvedPidFile,
     connectClient,
     sendRpc
+  };
+}
+
+/**
+ * A real net.createServer that accepts connections but never answers any
+ * request — simulates a wedged broker (busy with a long-running request and
+ * never reaching the second socket's data). Drives the client-side connect +
+ * initialize path with no server response, exposing any missing deadline.
+ */
+export async function spawnWedgedServer() {
+  const sessionDir = makeTempDir("broker-wedged-");
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const connections = new Set();
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    connections.add(socket);
+    socket.on("close", () => connections.delete(socket));
+    // Intentionally ignore "data": the broker is wedged and never responds.
+    socket.on("error", () => {});
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  return {
+    socketPath,
+    cleanup() {
+      // Destroy accepted sockets so the wedged client's request rejects and
+      // the process can exit. server.close() alone would wait for them.
+      for (const socket of connections) {
+        socket.destroy();
+      }
+      connections.clear();
+      try {
+        server.close();
+      } catch {}
+      try {
+        fs.unlinkSync(socketPath);
+      } catch {}
+    }
   };
 }

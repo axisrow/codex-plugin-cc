@@ -40,7 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
+import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, BROKER_HANDSHAKE_TIMEOUT_CODE, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 import { validateExplicitReasoningSelection, validateReasoningSelection } from "./model-catalog.mjs";
@@ -679,7 +679,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   }
 }
 
-async function withAppServer(cwd, fn, clientOptions = {}) {
+export async function withAppServer(cwd, fn, clientOptions = {}) {
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd, clientOptions);
@@ -688,8 +688,11 @@ async function withAppServer(cwd, fn, clientOptions = {}) {
     return result;
   } catch (error) {
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
+    const brokerHandshakeFailed =
+      error?.code === BROKER_HANDSHAKE_TIMEOUT_CODE && (client?.transport === "broker" || error?.transport === "broker");
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      brokerHandshakeFailed ||
       (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
 
     if (client) {
