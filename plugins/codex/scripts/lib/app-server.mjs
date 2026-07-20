@@ -22,6 +22,14 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
+// Error code attached to timeouts during the broker handshake, so withAppServer
+// can recognize them and fall back to a direct (non-broker) app-server. A
+// wedged broker — connect accepted but initialize never answered — must not
+// hang a second /codex:* command forever (fork #29 / upstream openai#509).
+export const BROKER_HANDSHAKE_TIMEOUT_CODE = "EBROKERTIMEOUT";
+const BROKER_CONNECT_TIMEOUT_MS = 2000;
+const BROKER_INITIALIZE_TIMEOUT_MS = 5000;
+
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
   title: "Codex Plugin",
@@ -283,29 +291,62 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
+    const handshakeError = (message) => {
+      const error = new Error(message);
+      error.code = BROKER_HANDSHAKE_TIMEOUT_CODE;
+      return error;
+    };
+
+    const connectTimeoutMs = this.options.brokerConnectTimeoutMs ?? BROKER_CONNECT_TIMEOUT_MS;
+    const initializeTimeoutMs = this.options.brokerInitializeTimeoutMs ?? BROKER_INITIALIZE_TIMEOUT_MS;
+
+    // Bound the connect step: a wedged broker may accept the socket but never
+    // signal connect — destroy and reject so the caller can fall back.
     await new Promise((resolve, reject) => {
       const target = parseBrokerEndpoint(this.endpoint);
       this.socket = net.createConnection({ path: target.path });
       this.socket.setEncoding("utf8");
-      this.socket.on("connect", resolve);
+      const connectTimer = setTimeout(() => {
+        this.socket.destroy();
+        reject(handshakeError("codex app-server broker connect timed out."));
+      }, connectTimeoutMs).unref?.();
+      this.socket.on("connect", () => {
+        clearTimeout(connectTimer);
+        resolve();
+      });
       this.socket.on("data", (chunk) => {
         this.handleChunk(chunk);
       });
       this.socket.on("error", (error) => {
+        clearTimeout(connectTimer);
         if (!this.exitResolved) {
           reject(error);
         }
         this.handleExit(error);
       });
       this.socket.on("close", () => {
+        clearTimeout(connectTimer);
         this.handleExit(this.exitError);
       });
     });
 
-    await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
-      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
+    // Bound the initialize request: a wedged broker may connect but never
+    // answer. Race the request against a deadline; on timeout, force the
+    // connection closed (handleExit rejects the pending request).
+    let initializeTimer;
+    const initializeDeadline = new Promise((_, reject) => {
+      initializeTimer = setTimeout(() => {
+        this.socket.destroy();
+        reject(handshakeError("codex app-server initialize timed out."));
+      }, initializeTimeoutMs).unref?.();
     });
+    await Promise.race([
+      this.request("initialize", {
+        clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+        capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
+      }),
+      initializeDeadline
+    ]).finally(() => clearTimeout(initializeTimer));
     this.notify("initialized", {});
   }
 
