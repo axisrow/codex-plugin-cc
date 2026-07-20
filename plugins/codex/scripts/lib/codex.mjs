@@ -50,6 +50,30 @@ const SERVICE_NAME = "claude_code_codex_plugin";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 
+// Hard upper bound on a single Codex turn. Without this, the completion await
+// at the end of captureTurn is unbounded: it is resolved ONLY by completeTurn()
+// and is never rejected on a stalled/dead process (rejectCompletion was dead
+// code). The foreground budget is set below the external Bash ceiling by the
+// companion so timeouts surface as structured errors instead of a SIGKILL.
+// Ported from @russjhammond's openai/codex-plugin-cc#376.
+const DEFAULT_TURN_TIMEOUT_MS = 600000;
+
+// Resolve the per-turn budget at CALL time, not import time. The companion sets
+// CODEX_TURN_TIMEOUT_MS (e.g. the foreground budget, below the Bash ceiling)
+// AFTER this module is imported; reading it at import froze the value at the
+// default and made --turn-timeout-ms / the foreground budget inert.
+function resolveTurnTimeoutMs(options = {}) {
+  const fromOptions = Number(options.turnTimeoutMs);
+  if (Number.isFinite(fromOptions) && fromOptions > 0) {
+    return fromOptions;
+  }
+  const fromEnv = Number(process.env.CODEX_TURN_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return DEFAULT_TURN_TIMEOUT_MS;
+}
+
 function cleanCodexStderr(stderr) {
   return stderr
     .split(/\r?\n/)
@@ -600,7 +624,37 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       completeTurn(state, response.turn);
     }
 
-    return await state.completion;
+    // Bound the await so it can never outlast a dead process or a runaway turn.
+    // Ported from @russjhammond's openai/codex-plugin-cc#376.
+    //   1. state.completion — resolves on turn/completed (or inferred). Wire the
+    //      previously-dead rejectCompletion to the client exit so an app-server
+    //      death AFTER startRequest resolved rejects the await immediately.
+    //   2. deadline — hard per-turn budget (resolveTurnTimeoutMs).
+    let exitRaceSettled = false;
+    client.exitPromise.then(() => {
+      if (exitRaceSettled || state.completed) {
+        return;
+      }
+      exitRaceSettled = true;
+      state.rejectCompletion(
+        client.exitError ?? new Error("codex app-server exited before the turn completed.")
+      );
+    });
+    const turnTimeoutMs = resolveTurnTimeoutMs(options);
+    let deadlineTimer = null;
+    const deadline = new Promise((_resolve, reject) => {
+      deadlineTimer = setTimeout(() => {
+        reject(new Error(`codex turn exceeded the ${turnTimeoutMs}ms turn budget.`));
+      }, turnTimeoutMs);
+      deadlineTimer.unref?.();
+    });
+    try {
+      return await Promise.race([state.completion, deadline]);
+    } finally {
+      if (deadlineTimer) {
+        clearTimeout(deadlineTimer);
+      }
+    }
   } finally {
     clearCompletionTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
