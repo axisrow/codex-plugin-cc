@@ -679,7 +679,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   }
 }
 
-async function withAppServer(cwd, fn, clientOptions = {}) {
+export async function withAppServer(cwd, fn, clientOptions = {}) {
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd, clientOptions);
@@ -688,9 +688,11 @@ async function withAppServer(cwd, fn, clientOptions = {}) {
     return result;
   } catch (error) {
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
+    const brokerHandshakeFailed =
+      error?.code === BROKER_HANDSHAKE_TIMEOUT_CODE && (client?.transport === "broker" || error?.transport === "broker");
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (client?.transport === "broker" && error?.code === BROKER_HANDSHAKE_TIMEOUT_CODE) ||
+      brokerHandshakeFailed ||
       (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
 
     if (client) {

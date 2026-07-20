@@ -393,7 +393,18 @@ export class CodexAppServerClient {
     const client = brokerEndpoint
       ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
       : new SpawnedCodexAppServerClient(cwd, options);
-    await client.initialize();
+    try {
+      await client.initialize();
+    } catch (error) {
+      // The handshake rejects before `connect()` returns, so callers like
+      // withAppServer cannot read `client.transport` (client is never assigned
+      // there). Tag the error with the transport so the caller can still tell
+      // a broker-handshake failure (worth a direct fallback) from a spawned one.
+      if (error && !error.transport) {
+        error.transport = client.transport;
+      }
+      throw error;
+    }
     return client;
   }
 }
