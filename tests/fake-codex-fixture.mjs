@@ -538,6 +538,11 @@ rl.on("line", (line) => {
       }
 
 	      case "turn/start": {
+		        if (BEHAVIOR === "stalled-turn-start") {
+		          // Never respond — simulates app-server alive but network stalled.
+		          // companion's deadline must timeout and reject.
+		          break;
+		        }
 	        if (BEHAVIOR === "turn-start-fails") {
 	          throw new Error("turn/start failed after thread resolution");
 	        }

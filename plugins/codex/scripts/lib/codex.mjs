@@ -603,41 +603,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   });
 
   try {
-    const response = await startRequest();
-    options.onResponse?.(response, state);
-    state.turnId = response.turn?.id ?? null;
-    if (state.turnId) {
-      state.threadTurnIds.set(state.threadId, state.turnId);
-    }
-    for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
-        applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-      }
-    }
-    state.bufferedNotifications.length = 0;
-
-    if (response.turn?.status && response.turn.status !== "inProgress") {
-      completeTurn(state, response.turn);
-    }
-
-    // Bound the await so it can never outlast a dead process or a runaway turn.
-    // Ported from @russjhammond's openai/codex-plugin-cc#376.
-    //   1. state.completion — resolves on turn/completed (or inferred). Wire the
-    //      previously-dead rejectCompletion to the client exit so an app-server
-    //      death AFTER startRequest resolved rejects the await immediately.
-    //   2. deadline — hard per-turn budget (resolveTurnTimeoutMs).
-    client.exitPromise.then(() => {
-      if (state.completed) {
-        return;
-      }
-      state.rejectCompletion(
-        client.exitError ?? new Error("codex app-server exited before the turn completed.")
-      );
-    });
+    // Arm the deadline BEFORE startRequest so a stalled turn/start (app-server
+    // alive but not responding) is also bounded. Finding #27-2.
     const turnTimeoutMs = resolveTurnTimeoutMs(options);
     let deadlineTimer = null;
     const deadline = new Promise((_resolve, reject) => {
@@ -646,13 +613,66 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       }, turnTimeoutMs);
       deadlineTimer.unref?.();
     });
+
+    // Wire exitPromise to rejectCompletion so an app-server death at any point
+    // (during startRequest OR during completion) rejects immediately.
+    client.exitPromise.then(() => {
+      if (state.completed) {
+        return;
+      }
+      state.rejectCompletion(
+        client.exitError ?? new Error("codex app-server exited before the turn completed.")
+      );
+    });
+
+    let result;
     try {
-      return await Promise.race([state.completion, deadline]);
+      // Race the entire lifecycle (startRequest + completion) against the deadline.
+      result = await Promise.race([
+        (async () => {
+          const response = await startRequest();
+          options.onResponse?.(response, state);
+          state.turnId = response.turn?.id ?? null;
+          if (state.turnId) {
+            state.threadTurnIds.set(state.threadId, state.turnId);
+          }
+          for (const message of state.bufferedNotifications) {
+            if (belongsToTurn(state, message)) {
+              applyTurnNotification(state, message);
+            } else {
+              if (previousHandler) {
+                previousHandler(message);
+              }
+            }
+          }
+          state.bufferedNotifications.length = 0;
+
+          if (response.turn?.status && response.turn.status !== "inProgress") {
+            completeTurn(state, response.turn);
+          }
+
+          return await state.completion;
+        })(),
+        deadline
+      ]);
+    } catch (error) {
+      // Finding #27-1: on deadline, interrupt the in-flight turn so the broker
+      // stops executing a write-capable task after we've reported it failed.
+      // Best-effort: if interrupt fails (broker gone, network down), the error
+      // from the deadline still propagates — we just don't block on it.
+      if (state.threadId && state.turnId && options.cwd) {
+        await interruptAppServerTurn(options.cwd, {
+          threadId: state.threadId,
+          turnId: state.turnId
+        }).catch(() => {});
+      }
+      throw error;
     } finally {
       if (deadlineTimer) {
         clearTimeout(deadlineTimer);
       }
     }
+    return result;
   } finally {
     clearCompletionTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
@@ -1095,6 +1115,8 @@ export async function runAppServerReview(cwd, options = {}) {
           target: options.target
         }),
       {
+        cwd,
+        turnTimeoutMs: options.turnTimeoutMs,
         onProgress: options.onProgress,
         onResponse(response, state) {
           if (response.reviewThreadId) {
@@ -1230,6 +1252,8 @@ export async function runAppServerTurn(cwd, options = {}) {
           outputSchema: options.outputSchema ?? null
         }),
       {
+        cwd,
+        turnTimeoutMs: options.turnTimeoutMs,
         onProgress: options.onProgress,
         onResponse() {
           if (!options.effort) {
