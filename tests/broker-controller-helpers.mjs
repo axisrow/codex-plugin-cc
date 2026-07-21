@@ -231,3 +231,62 @@ export async function spawnWedgedServer() {
     }
   };
 }
+
+/**
+ * A real net.createServer that speaks just enough JSON-RPC to pass the broker
+ * handshake, then returns BROKER_BUSY_RPC_CODE (-32001) for every subsequent
+ * request — simulates a shared broker that accepted initialize while busy with
+ * another in-flight stream. Drives withAppServer's post-handshake busy
+ * fallback, which must retry the operation on a direct (non-broker) client.
+ */
+export async function spawnBusyBroker() {
+  const sessionDir = makeTempDir("broker-busy-");
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const connections = new Set();
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    connections.add(socket);
+    socket.on("close", () => connections.delete(socket));
+    socket.on("error", () => {});
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        newlineIndex = buffer.indexOf("\n");
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === undefined) {
+          continue;
+        }
+        if (message.method === "initialize") {
+          socket.write(`${JSON.stringify({ id: message.id, result: { userAgent: "busy-broker" } })}\n`);
+        } else {
+          socket.write(`${JSON.stringify({ id: message.id, error: { code: -32001, message: "Shared Codex broker is busy." } })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  return {
+    socketPath,
+    cleanup() {
+      for (const socket of connections) {
+        socket.destroy();
+      }
+      connections.clear();
+      try {
+        server.close();
+      } catch {}
+      try {
+        fs.unlinkSync(socketPath);
+      } catch {}
+    }
+  };
+}

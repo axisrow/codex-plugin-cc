@@ -321,6 +321,12 @@ rl.on("line", (line) => {
   try {
     switch (message.method) {
       case "initialize":
+        if (BEHAVIOR === "stalled-initialize") {
+          // Never respond — simulates a spawned app-server that is alive (stdin
+          // open) but wedged on initialize. SpawnedCodexAppServerClient.initialize()
+          // must bound this handshake (fork #31) instead of hanging forever.
+          break;
+        }
         state.capabilities = message.params.capabilities || null;
         saveState(state);
         send({ id: message.id, result: { userAgent: "fake-codex-app-server" } });

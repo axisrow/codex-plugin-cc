@@ -40,7 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, BROKER_HANDSHAKE_TIMEOUT_CODE, CodexAppServerClient } from "./app-server.mjs";
+import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 import { validateExplicitReasoningSelection, validateReasoningSelection } from "./model-catalog.mjs";
@@ -687,13 +687,16 @@ export async function withAppServer(cwd, fn, clientOptions = {}) {
     await client.close();
     return result;
   } catch (error) {
-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
-    const brokerHandshakeFailed =
-      error?.code === BROKER_HANDSHAKE_TIMEOUT_CODE && (client?.transport === "broker" || error?.transport === "broker");
+    // Fall back to a direct (non-broker) app-server when the broker transport
+    // is unusable. Two distinct shapes:
+    //  - broker/busy (-32001) arrives AFTER a successful handshake, while
+    //    `client` is assigned — read the transport off the client.
+    //  - a handshake failure (timeout / ENOENT / ECONNREFUSED) rejects inside
+    //    connect() before `client` is assigned — tagged brokerFatal in
+    //    CodexAppServerClient.connect.
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      brokerHandshakeFailed ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
+      error?.brokerFatal === true;
 
     if (client) {
       await client.close().catch(() => {});

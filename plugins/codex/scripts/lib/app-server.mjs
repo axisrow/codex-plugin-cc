@@ -1,5 +1,5 @@
 /**
- * @typedef {Error & { data?: unknown, rpcCode?: number }} ProtocolError
+ * @typedef {Error & { code?: string, data?: unknown, rpcCode?: number }} ProtocolError
  * @typedef {import("./app-server-protocol").AppServerMethod} AppServerMethod
  * @typedef {import("./app-server-protocol").AppServerNotification} AppServerNotification
  * @typedef {import("./app-server-protocol").AppServerNotificationHandler} AppServerNotificationHandler
@@ -22,13 +22,16 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
-// Error code attached to timeouts during the broker handshake, so withAppServer
-// can recognize them and fall back to a direct (non-broker) app-server. A
-// wedged broker — connect accepted but initialize never answered — must not
-// hang a second /codex:* command forever (fork #29 / upstream openai#509).
-export const BROKER_HANDSHAKE_TIMEOUT_CODE = "EBROKERTIMEOUT";
+// Error code attached to app-server request/handshake timeouts, so withAppServer
+// can recognize them and fall back to a direct (non-broker) app-server. A wedged
+// app-server — connect accepted but a request (initialize, ...) never answered —
+// must not hang a /codex:* command forever (fork #29/#31 / upstream openai#509).
+// Despite the "EBROKER" prefix the code is transport-agnostic: request() is on
+// the base class and times out both the broker and the spawned transports.
+export const REQUEST_TIMEOUT_CODE = "EBROKERTIMEOUT";
 const BROKER_CONNECT_TIMEOUT_MS = 2000;
 const BROKER_INITIALIZE_TIMEOUT_MS = 5000;
+const SPAWNED_INITIALIZE_TIMEOUT_MS = 10000;
 
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
@@ -89,18 +92,37 @@ class AppServerClientBase {
    * @template {AppServerMethod} M
    * @param {M} method
    * @param {import("./app-server-protocol").AppServerRequestParams<M>} params
+   * @param {{ timeoutMs?: number, onTimeout?: () => void }} [options]
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
-  request(method, params) {
+  request(method, params, options = {}) {
     if (this.closed || this.exitResolved) {
       throw new Error("codex app-server client is closed.");
     }
 
     const id = this.nextId;
     this.nextId += 1;
+    const { timeoutMs, onTimeout } = options;
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      let timer = null;
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          // Reject and remove first; a late answer for this id is then a no-op
+          // in handleLine (it checks this.pending.get(id)). unref'd so a timed-
+          // out request can't pin the event loop. onTimeout (e.g. socket.destroy
+          // for the broker transport) runs before reject to force-close the peer.
+          if (this.pending.delete(id)) {
+            try {
+              onTimeout?.();
+            } catch {}
+            const error = /** @type {ProtocolError} */ (new Error(`codex app-server ${method} timed out.`));
+            error.code = REQUEST_TIMEOUT_CODE;
+            reject(error);
+          }
+        }, timeoutMs).unref?.();
+      }
+      this.pending.set(id, { resolve, reject, method, timer });
       this.sendMessage({ id, method, params });
     });
   }
@@ -147,6 +169,9 @@ class AppServerClientBase {
         return;
       }
       this.pending.delete(message.id);
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
 
       if (message.error) {
         pending.reject(createProtocolError(message.error.message ?? `codex app-server ${pending.method} failed.`, message.error));
@@ -177,6 +202,9 @@ class AppServerClientBase {
     this.exitError = error ?? null;
 
     for (const pending of this.pending.values()) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
       pending.reject(this.exitError ?? new Error("codex app-server connection closed."));
     }
     this.pending.clear();
@@ -230,11 +258,40 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleLine(line);
     });
 
-    await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
-      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
-    });
+    try {
+      await this.request("initialize", {
+        clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+        capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
+      }, {
+        timeoutMs: this.options.spawnedInitializeTimeoutMs ?? SPAWNED_INITIALIZE_TIMEOUT_MS
+      });
+    } catch (error) {
+      // A handshake failure (timeout, app-server crash) must not orphan the
+      // spawned child. Kill it so the caller's fallback / teardown is clean.
+      this.handleExit(error);
+      this.killChildNow();
+      throw error;
+    }
     this.notify("initialized", {});
+  }
+
+  // Best-effort synchronous kill of the spawned child. On Windows with
+  // shell:true the direct child is cmd.exe, so terminateProcessTree takes the
+  // whole tree (grandchild node included); elsewhere SIGTERM suffices. Shared
+  // by initialize()'s handshake-failure path and close()'s deferred kill.
+  killChildNow() {
+    if (!(this.proc && !this.proc.killed && this.proc.exitCode === null)) {
+      return;
+    }
+    try {
+      if (process.platform === "win32") {
+        terminateProcessTree(this.proc.pid);
+      } else {
+        this.proc.kill("SIGTERM");
+      }
+    } catch {
+      // Best-effort cleanup — swallow to avoid crashing the host during shutdown.
+    }
   }
 
   async close() {
@@ -251,23 +308,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
 
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.end();
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
-          // On Windows with shell: true, the direct child is cmd.exe.
-          // Use terminateProcessTree to kill the entire tree including
-          // the grandchild node process.
-          if (process.platform === "win32") {
-            try {
-              terminateProcessTree(this.proc.pid);
-            } catch {
-              // Best-effort cleanup inside an unref'd timer — swallow errors
-              // to avoid crashing the host process during shutdown.
-            }
-          } else {
-            this.proc.kill("SIGTERM");
-          }
-        }
-      }, 50).unref?.();
+      setTimeout(() => this.killChildNow(), 50).unref?.();
     }
 
     await this.exitPromise;
@@ -292,8 +333,8 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 
   async initialize() {
     const handshakeError = (message) => {
-      const error = new Error(message);
-      error.code = BROKER_HANDSHAKE_TIMEOUT_CODE;
+      const error = /** @type {ProtocolError} */ (new Error(message));
+      error.code = REQUEST_TIMEOUT_CODE;
       return error;
     };
 
@@ -331,22 +372,18 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     });
 
     // Bound the initialize request: a wedged broker may connect but never
-    // answer. Race the request against a deadline; on timeout, force the
-    // connection closed (handleExit rejects the pending request).
-    let initializeTimer;
-    const initializeDeadline = new Promise((_, reject) => {
-      initializeTimer = setTimeout(() => {
-        this.socket.destroy();
-        reject(handshakeError("codex app-server initialize timed out."));
-      }, initializeTimeoutMs).unref?.();
+    // answer. On timeout, destroy the socket so the connection does not linger
+    // (onTimeout) and reject with a handshake-timeout error code.
+    await this.request("initialize", {
+      clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
+      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
+    }, {
+      timeoutMs: initializeTimeoutMs,
+      // Destroying the socket fires the close handler → handleExit, which
+      // rejects any other pending requests and resolves exitPromise so a
+      // wedged broker connection does not linger after the handshake fails.
+      onTimeout: () => this.socket?.destroy()
     });
-    await Promise.race([
-      this.request("initialize", {
-        clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
-        capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
-      }),
-      initializeDeadline
-    ]).finally(() => clearTimeout(initializeTimer));
     this.notify("initialized", {});
   }
 
@@ -400,8 +437,14 @@ export class CodexAppServerClient {
       // withAppServer cannot read `client.transport` (client is never assigned
       // there). Tag the error with the transport so the caller can still tell
       // a broker-handshake failure (worth a direct fallback) from a spawned one.
+      // For the broker transport every initialization failure is transport-fatal
+      // (timeout, ENOENT, ECONNREFUSED — the broker socket is unusable), so mark
+      // it once here and let withAppServer match on a single predicate.
       if (error && !error.transport) {
         error.transport = client.transport;
+        if (client.transport === "broker") {
+          error.brokerFatal = true;
+        }
       }
       throw error;
     }
