@@ -1,5 +1,5 @@
 /**
- * @typedef {Error & { data?: unknown, rpcCode?: number }} ProtocolError
+ * @typedef {Error & { code?: string, data?: unknown, rpcCode?: number }} ProtocolError
  * @typedef {import("./app-server-protocol").AppServerMethod} AppServerMethod
  * @typedef {import("./app-server-protocol").AppServerNotification} AppServerNotification
  * @typedef {import("./app-server-protocol").AppServerNotificationHandler} AppServerNotificationHandler
@@ -116,7 +116,7 @@ class AppServerClientBase {
             try {
               onTimeout?.();
             } catch {}
-            const error = new Error(`codex app-server ${method} timed out.`);
+            const error = /** @type {ProtocolError} */ (new Error(`codex app-server ${method} timed out.`));
             error.code = REQUEST_TIMEOUT_CODE;
             reject(error);
           }
@@ -333,7 +333,7 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 
   async initialize() {
     const handshakeError = (message) => {
-      const error = new Error(message);
+      const error = /** @type {ProtocolError} */ (new Error(message));
       error.code = REQUEST_TIMEOUT_CODE;
       return error;
     };
