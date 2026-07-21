@@ -88,7 +88,7 @@ function buildThreadParams(cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
+    sandbox: options.sandbox ?? null,
     config: options.effort ? { model_reasoning_effort: options.effort } : null,
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
@@ -102,7 +102,7 @@ function buildResumeParams(threadId, cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
+    sandbox: options.sandbox ?? null
   };
 }
 

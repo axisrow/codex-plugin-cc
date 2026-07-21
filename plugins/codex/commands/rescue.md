@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
-argument-hint: "[--background|--wait] [--cwd <dir>|-C <dir>] [--resume|--fresh] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--read-only] [--cwd <dir>|-C <dir>] [--resume|--fresh] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -17,7 +17,7 @@ Execution mode:
 - If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
 - If neither flag is present, default to `--background`. Rescue tasks are open-ended and routinely exceed Claude's Bash-tool timeout; starting in background avoids the auto-background trap (see Operating rules).
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--model` and `--effort` are runtime-selection flags. Preserve them and `--read-only` for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - `--cwd <dir>` and `-C <dir>` are workspace-routing flags. Preserve the directory for the resume preflight and the forwarded `task` call, but do not treat either form as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
