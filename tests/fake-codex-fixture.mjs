@@ -420,7 +420,13 @@ rl.on("line", (line) => {
 	          sandbox: message.params.sandbox ?? null
 	        };
 	        saveState(state);
-	        send({ id: message.id, result: { thread: buildThread(thread), model: selectedModel, modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: selectedEffort } });
+	        // resume-ignores-sandbox: simulate a real Codex app-server that keeps a
+	        // loaded thread's sandbox and ignores the thread/resume override — so an
+	        // explicit --read-only pin on a write-capable thread is silently lost.
+	        const resumeSandbox = BEHAVIOR === "resume-ignores-sandbox"
+	          ? { type: "workspaceWrite", writableRoots: [], networkAccess: false }
+	          : { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false };
+	        send({ id: message.id, result: { thread: buildThread(thread), model: selectedModel, modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: resumeSandbox, reasoningEffort: selectedEffort } });
 	        break;
       }
 
