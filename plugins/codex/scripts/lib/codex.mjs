@@ -88,7 +88,7 @@ function buildThreadParams(cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
+    sandbox: options.sandbox ?? null,
     config: options.effort ? { model_reasoning_effort: options.effort } : null,
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
@@ -102,13 +102,44 @@ function buildResumeParams(threadId, cwd, options = {}) {
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
+    sandbox: options.sandbox ?? null
   };
 }
 
 /** @returns {UserInput[]} */
 function buildTurnInput(prompt) {
   return [{ type: "text", text: prompt, text_elements: [] }];
+}
+
+// Map a requested sandbox shorthand ("read-only"/"workspace-write") to the
+// app-server's sandbox-type vocabulary ("readOnly"/"workspaceWrite").
+function requestedSandboxType(requested) {
+  if (requested === "read-only") {
+    return "readOnly";
+  }
+  if (requested === "workspace-write") {
+    return "workspaceWrite";
+  }
+  return null;
+}
+
+// Fail closed when an explicit read-only pin was requested but the app-server
+// resolved a write-capable sandbox. Codex 0.144.x keeps a loaded thread's
+// sandbox and ignores thread/resume overrides, so without this check
+// --read-only --resume-last could silently run with write access. (The write
+// pin is not enforced here: a write request on a read-only resolved sandbox is
+// a downgrade, not a safety leak.)
+function assertExplicitSandboxHonored(requested, resolved) {
+  if (requestedSandboxType(requested) !== "readOnly") {
+    return;
+  }
+  const resolvedType = resolved?.type ?? null;
+  if (resolvedType === "readOnly") {
+    return;
+  }
+  throw new Error(
+    `Requested a read-only sandbox, but the app-server resolved ${resolvedType ?? "an unknown sandbox"} — refusing to run with a sandbox that does not match the explicit read-only pin. Start a fresh thread or drop --read-only.`
+  );
 }
 
 function shorten(text, limit = 72) {
@@ -1229,6 +1260,11 @@ export async function runAppServerTurn(cwd, options = {}) {
       reasoningEffort: response.reasoningEffort,
       sandbox: response.sandbox
     };
+    // Fail closed when an explicit sandbox pin is not honored. Codex app-server
+    // (0.144.x) keeps a loaded thread's sandbox and ignores thread/resume
+    // overrides, so --read-only --resume-last on a write-capable thread would
+    // otherwise run with write access — violating the --read-only contract.
+    assertExplicitSandboxHonored(options.sandbox, resolved.sandbox);
     await validateReasoningSelection(client, {
       model: options.model ?? threadSelection.model,
       effort: options.effort ?? threadSelection.reasoningEffort,

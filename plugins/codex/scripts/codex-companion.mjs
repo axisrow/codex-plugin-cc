@@ -93,7 +93,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--cwd <dir>] [--resume-last|--resume|--fresh] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--read-only] [--cwd <dir>] [--resume-last|--resume|--fresh] [--model <model|spark|sol|terra|luna>] [--effort <none|minimal|low|medium|high|xhigh|max|ultra>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -544,7 +544,7 @@ async function executeTaskRun(request) {
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
+    sandbox: request.write ? "workspace-write" : request.readOnly ? "read-only" : null,
     onProgress: request.onProgress,
     persistThread: true,
     turnTimeoutMs: request.turnTimeoutMs,
@@ -659,13 +659,14 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId, turnTimeoutMs }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, readOnly, resumeLast, jobId, turnTimeoutMs }) {
   return {
     cwd,
     model,
     effort,
     prompt,
     write,
+    readOnly,
     resumeLast,
     jobId,
     turnTimeoutMs
@@ -843,7 +844,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file", "turn-timeout-ms"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "read-only", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
     }
@@ -862,6 +863,10 @@ async function handleTask(argv) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
   const write = Boolean(options.write);
+  const readOnly = Boolean(options["read-only"]);
+  if (write && readOnly) {
+    throw new Error("Choose either --write or --read-only.");
+  }
   const taskMetadata = buildTaskRunMetadata({
     prompt,
     resumeLast
@@ -878,6 +883,7 @@ async function handleTask(argv) {
       effort,
       prompt,
       write,
+      readOnly,
       resumeLast,
       jobId: job.id,
       turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options)
@@ -897,6 +903,7 @@ async function handleTask(argv) {
         effort,
         prompt,
         write,
+        readOnly,
         resumeLast,
         jobId: job.id,
         turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
