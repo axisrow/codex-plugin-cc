@@ -8,6 +8,17 @@ Invoke the `codex:codex-rescue` subagent via the `Agent` tool (`subagent_type: "
 `codex:codex-rescue` is a subagent, not a skill — do not call `Skill(codex:codex-rescue)` (no such skill) or `Skill(codex:rescue)` (that re-enters this command and hangs the session). The command runs inline so the `Agent` tool stays in scope; forked general-purpose subagents do not expose it.
 The final user-visible response must be Codex's output verbatim.
 
+Launch-line description:
+
+The `Agent` tool `description` parameter is free-form text that becomes the parenthesized label on the launch line, e.g. `codex:codex-rescue(<description>)`. It is composed before the subagent selects the model, so include the resolved model and effort in it so the user can see which Codex configuration is running — especially for background runs where the companion's stderr announce is not visible.
+
+Format the description as `<short topic> model=<model> effort=<effort>`, resolving aliases to full ids the way the companion does:
+
+- `spark` → `gpt-5.3-codex-spark`, `sol` → `gpt-5.6-sol`, `terra` → `gpt-5.6-terra`, `luna` → `gpt-5.6-luna`. A concrete id (e.g. `gpt-5.4-mini`) passes through unchanged.
+- When the user did not specify `--model`, use `model=default`. When they did not specify `--effort`, use `effort=default`.
+
+Example: a request about "issue #144" with `--model sol --effort xhigh` → description `Codex консультация по #144 model=gpt-5.6-sol effort=xhigh`.
+
 Raw user request:
 $ARGUMENTS
 
