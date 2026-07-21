@@ -645,6 +645,9 @@ function readTaskPrompt(cwd, options, positionals) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
   }
 
+  if (positionals.length === 1 && positionals[0] === "-") {
+    return readStdinIfPiped();
+  }
   const positionalPrompt = positionals.join(" ");
   return positionalPrompt || readStdinIfPiped();
 }
