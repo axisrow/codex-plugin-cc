@@ -47,6 +47,7 @@ import { validateExplicitReasoningSelection, validateReasoningSelection } from "
 import { TASK_THREAD_PREFIX } from "./task-thread.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
+const REVIEW_THREAD_PREFIX = "Codex Companion Review";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 
@@ -157,6 +158,11 @@ function looksLikeVerificationCommand(command) {
   return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
     command
   );
+}
+
+function buildReviewThreadName(targetLabel) {
+  const excerpt = shorten(targetLabel, 56);
+  return excerpt ? `${REVIEW_THREAD_PREFIX}: ${excerpt}` : REVIEW_THREAD_PREFIX;
 }
 
 function extractThreadId(message) {
@@ -1121,8 +1127,8 @@ export async function runAppServerReview(cwd, options = {}) {
       model: options.model,
       effort: options.effort,
       sandbox: "read-only",
-      ephemeral: true,
-      threadName: options.threadName
+      ephemeral: false,
+      threadName: options.threadName ?? buildReviewThreadName(options.target?.label)
     });
     const sourceThreadId = response.thread.id;
     const resolved = {
