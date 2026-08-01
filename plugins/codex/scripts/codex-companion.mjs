@@ -468,7 +468,9 @@ async function executeReviewRun(request) {
     effort: request.effort,
     sandbox: "read-only",
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
-    onProgress: request.onProgress
+    onProgress: request.onProgress,
+    persistThread: true,
+    threadName: `Codex Companion Review: ${context.target.label}`.slice(0, 80)
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
