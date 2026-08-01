@@ -786,6 +786,48 @@ rl.on("line", (line) => {
 	            }
 	          });
 	          // Then silence — no further notifications for this turn, ever.
+	        } else if (BEHAVIOR === "single-item-progress-idle-ok") {
+	          // One item/started, then a long stream of commandExecution outputDelta
+	          // notifications spanning well past the idle budget with no other
+	          // item/started or item/completed in between, then item/completed.
+	          // Must NOT time out — the deltas count as activity too.
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({
+	            method: "item/started",
+	            params: {
+	              threadId: thread.id,
+	              turnId,
+	              item: { type: "commandExecution", id: "cmd_" + turnId, command: "long-running step", status: "inProgress" }
+	            }
+	          });
+	          const gapMs = 700;
+	          const deltaCount = 6;
+	          let step = 0;
+	          const tick = () => {
+	            step += 1;
+	            send({
+	              method: "item/commandExecution/outputDelta",
+	              params: { threadId: thread.id, turnId, itemId: "cmd_" + turnId, delta: "chunk " + step + "\\n" }
+	            });
+	            if (step >= deltaCount) {
+	              send({
+	                method: "item/completed",
+	                params: {
+	                  threadId: thread.id,
+	                  turnId,
+	                  item: { type: "commandExecution", id: "cmd_" + turnId, command: "long-running step", status: "completed" }
+	                }
+	              });
+	              send({
+	                method: "item/completed",
+	                params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" } }
+	              });
+	              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+	              return;
+	            }
+	            setTimeout(tick, gapMs);
+	          };
+	          setTimeout(tick, gapMs);
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }

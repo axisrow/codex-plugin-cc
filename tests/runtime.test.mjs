@@ -3228,3 +3228,29 @@ test("task that goes silent after the first event times out via the idle budget,
   const storedJob = readPersistedJob(repo);
   assert.equal(storedJob.status, "failed", "job must be marked failed");
 });
+
+test("task with in-item output-delta progress longer than the budget does NOT time out (single long item, idle not wall-clock)", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "single-item-progress-idle-ok");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // Fixture emits one item/started, then 6 item/commandExecution/outputDelta
+  // notifications spaced 700ms apart (~4.2s total) with no other item/started
+  // or item/completed in between, then completes. The gap between the initial
+  // item/started and the first delta (and each subsequent delta) is well
+  // under the 2s budget, but the total span from item/started to the final
+  // item/completed exceeds it. Must NOT time out: in-item progress deltas
+  // must reset the idle deadline just like item boundaries do.
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, `must succeed despite one long item spanning the budget: ${result.stderr}`);
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-item");
+});

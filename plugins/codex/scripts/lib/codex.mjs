@@ -619,6 +619,23 @@ function applyTurnNotification(state, message) {
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
       break;
+    // In-item progress/delta notifications: a single item (a long command
+    // execution, an MCP tool call, streamed model/reasoning output) can run
+    // well past the idle budget while continuously producing these without
+    // ever emitting another item/started or item/completed in between. Treat
+    // them as activity too, or a genuinely progressing item gets interrupted
+    // mid-flight — the exact failure mode this idle timeout exists to avoid.
+    case "item/commandExecution/outputDelta":
+    case "item/fileChange/outputDelta":
+    case "item/mcpToolCall/progress":
+    case "item/agentMessage/delta":
+    case "item/plan/delta":
+    case "item/reasoning/summaryTextDelta":
+    case "item/reasoning/textDelta":
+    case "command/exec/outputDelta":
+    case "process/outputDelta":
+      state.resetIdleDeadline?.();
+      break;
     case "error":
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
