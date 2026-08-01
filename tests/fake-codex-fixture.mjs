@@ -735,6 +735,57 @@ rl.on("line", (line) => {
 	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
 	        } else if (BEHAVIOR === "slow-task") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
+	        } else if (BEHAVIOR === "spaced-events-idle-ok") {
+	          // Long total turn duration (well past a fixed wall-clock budget),
+	          // but each gap between events is short. Must NOT time out under an
+	          // idle (inactivity) budget, only under a wall-clock one.
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          const gapMs = 700;
+	          const stepCount = 6;
+	          let step = 0;
+	          const tick = () => {
+	            step += 1;
+	            send({
+	              method: "item/started",
+	              params: {
+	                threadId: thread.id,
+	                turnId,
+	                item: { type: "commandExecution", id: "cmd_" + turnId + "_" + step, command: "step " + step, status: "inProgress" }
+	              }
+	            });
+	            send({
+	              method: "item/completed",
+	              params: {
+	                threadId: thread.id,
+	                turnId,
+	                item: { type: "commandExecution", id: "cmd_" + turnId + "_" + step, command: "step " + step, status: "completed" }
+	              }
+	            });
+	            if (step >= stepCount) {
+	              send({
+	                method: "item/completed",
+	                params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" } }
+	              });
+	              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+	              return;
+	            }
+	            setTimeout(tick, gapMs);
+	          };
+	          setTimeout(tick, gapMs);
+	        } else if (BEHAVIOR === "goes-silent-after-first-event") {
+	          // Emits one item/started and then never sends anything else for this
+	          // turn. Must time out via the idle budget measured from that last
+	          // event, not via a full-turn budget counted from turn/started.
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({
+	            method: "item/started",
+	            params: {
+	              threadId: thread.id,
+	              turnId,
+	              item: { type: "commandExecution", id: "cmd_" + turnId + "_1", command: "step 1", status: "inProgress" }
+	            }
+	          });
+	          // Then silence — no further notifications for this turn, ever.
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }
