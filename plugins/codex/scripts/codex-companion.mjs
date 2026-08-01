@@ -467,6 +467,7 @@ async function executeReviewRun(request) {
     model: request.model,
     effort: request.effort,
     sandbox: "read-only",
+    turnTimeoutMs: request.turnTimeoutMs,
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
     persistThread: true,

@@ -3177,3 +3177,27 @@ test("task with stalled turn/start times out via --turn-timeout-ms instead of ha
   const storedJob = readPersistedJob(repo);
   assert.equal(storedJob.status, "failed", "job must be marked failed");
 });
+
+test("adversarial-review with stalled turn/start honors --turn-timeout-ms instead of the library default", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-turn-start");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const start = Date.now();
+  // 3s timeout — must reject within that, not hang until the library's 600s default.
+  const result = run("node", [SCRIPT, "adversarial-review", "--turn-timeout-ms", "3000"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  const elapsedMs = Date.now() - start;
+
+  // Must NOT hang — exit with a timeout error well under the library default.
+  assert.notEqual(result.status, 0, "must exit non-zero on timeout, not hang");
+  assert.match(result.stderr, /turn budget/i, "error must mention the turn budget");
+  assert.ok(elapsedMs < 30000, `must honor --turn-timeout-ms, not the 600s library default (took ${elapsedMs}ms)`);
+});
