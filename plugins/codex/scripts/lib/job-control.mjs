@@ -2,7 +2,15 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { isProcessAlive } from "./process.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  getConfig,
+  listJobs,
+  readJobFile,
+  resolveJobFile,
+  UNREPORTED_PROCESS_EXIT_MESSAGE,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -323,10 +331,21 @@ export function resolveResultJob(cwd, reference) {
   throw new Error("No finished Codex jobs found for this repository yet.");
 }
 
+function isOrphanedTurn(job) {
+  return (
+    job.status === "failed" &&
+    job.errorMessage === UNREPORTED_PROCESS_EXIT_MESSAGE &&
+    Boolean(job.threadId) &&
+    Boolean(job.turnId)
+  );
+}
+
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter(
+    (job) => job.status === "queued" || job.status === "running" || isOrphanedTurn(job)
+  );
 
   if (reference) {
     const selected = matchJobReference(activeJobs, reference);

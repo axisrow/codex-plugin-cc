@@ -2262,6 +2262,87 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
   assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
 });
 
+test("cancel reaches a job orphaned by a SIGKILLed companion process (closes #42)", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const logFile = path.join(jobsDir, "task-orphaned.log");
+  const jobFile = path.join(jobsDir, "task-orphaned.json");
+  fs.writeFileSync(logFile, "[2026-03-18T15:30:00.000Z] Starting Codex Task.\n", "utf8");
+  fs.writeFileSync(
+    jobFile,
+    JSON.stringify(
+      {
+        id: "task-orphaned",
+        status: "running",
+        title: "Codex Task",
+        threadId: "thr_orphaned",
+        turnId: "turn_orphaned",
+        logFile
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-orphaned",
+            status: "running",
+            title: "Codex Task",
+            jobClass: "task",
+            summary: "Investigate flaky test",
+            threadId: "thr_orphaned",
+            turnId: "turn_orphaned",
+            // A pid that is guaranteed to be dead simulates the SIGKILLed foreground process.
+            pid: 999999,
+            logFile,
+            createdAt: "2026-03-18T15:30:00.000Z",
+            startedAt: "2026-03-18T15:30:01.000Z",
+            updatedAt: "2026-03-18T15:30:02.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  // Reconciliation (triggered by /codex:status) flips the dead-pid job to "failed"
+  // before cancel ever runs, mirroring the real orphan sequence from the issue.
+  const statusResult = run("node", [SCRIPT, "status", "--json"], { cwd: workspace });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const reconciled = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.id === "task-orphaned"
+  );
+  assert.equal(reconciled.status, "failed");
+  assert.equal(reconciled.errorMessage, "Process exited without reporting.");
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace
+  });
+
+  assert.equal(cancelResult.status, 0, cancelResult.stderr);
+  assert.equal(JSON.parse(cancelResult.stdout).status, "cancelled");
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const cancelled = state.jobs.find((job) => job.id === "task-orphaned");
+  assert.equal(cancelled.status, "cancelled");
+
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "cancelled");
+  assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
+});
+
 test("failed cancellation restores a live job so cancellation can be retried", () => {
   const workspace = makeTempDir();
   const job = {

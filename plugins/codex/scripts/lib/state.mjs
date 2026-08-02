@@ -12,7 +12,7 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
-const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
+export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
 
 function nowIso() {
   return new Date().toISOString();
