@@ -470,6 +470,7 @@ async function executeReviewRun(request) {
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
     persistThread: true,
+    turnTimeoutMs: request.turnTimeoutMs,
     threadName: `Codex Companion Review: ${context.target.label}`.slice(0, 80)
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
