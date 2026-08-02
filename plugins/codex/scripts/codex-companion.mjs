@@ -702,8 +702,14 @@ async function executeTransfer(cwd, options = {}) {
   };
 }
 
-// Resolve the per-turn timeout from CLI options. Precedence:
+// Resolve the per-turn IDLE timeout from CLI options. Precedence:
 //   --turn-timeout-ms flag > CODEX_TURN_TIMEOUT_MS env > foreground/background default.
+// This is how long the turn may go silent (no turn/started, item/started,
+// item/completed, or in-item progress/delta notification) before it's
+// considered dead — NOT a budget for the turn's total duration. A turn that
+// keeps producing events can run far longer than this value without being
+// killed; see HARD_WALL_CLOCK_CEILING_MS in lib/codex.mjs for the separate,
+// much larger backstop on that case.
 // Foreground default is just under the Bash-tool ceiling (110s) so a stalled turn
 // returns a structured error instead of being SIGKILLed. Background gets the full
 // 600s default (no external ceiling to collide with).

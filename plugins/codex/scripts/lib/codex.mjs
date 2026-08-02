@@ -24,6 +24,7 @@
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
+ *   resetIdleDeadline: (() => void) | null,
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
@@ -51,18 +52,40 @@ const REVIEW_THREAD_PREFIX = "Codex Companion Review";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 
-// Hard upper bound on a single Codex turn. Without this, the completion await
-// at the end of captureTurn is unbounded: it is resolved ONLY by completeTurn()
-// and is never rejected on a stalled/dead process (rejectCompletion was dead
-// code). The foreground budget is set below the external Bash ceiling by the
-// companion so timeouts surface as structured errors instead of a SIGKILL.
-// Ported from @russjhammond's openai/codex-plugin-cc#376.
+// Hard upper bound on Codex agent inactivity within a single turn. Without
+// this, the completion await at the end of captureTurn is unbounded: it is
+// resolved ONLY by completeTurn() and is never rejected on a stalled/dead
+// process (rejectCompletion was dead code). The foreground budget is set
+// below the external Bash ceiling by the companion so timeouts surface as
+// structured errors instead of a SIGKILL.
+// Originally ported as a fixed whole-turn budget from @russjhammond's
+// openai/codex-plugin-cc#376; redesigned as an idle (inactivity) budget —
+// see resolveTurnTimeoutMs below for why.
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
 
-// Resolve the per-turn budget at CALL time, not import time. The companion sets
-// CODEX_TURN_TIMEOUT_MS (e.g. the foreground budget, below the Bash ceiling)
-// AFTER this module is imported; reading it at import froze the value at the
-// default and made --turn-timeout-ms / the foreground budget inert.
+// Coarse wall-clock failsafe, independent of the idle budget. The idle timer
+// resets on every turn/started, item/started, item/completed, and in-item
+// progress/delta notification, so a turn that keeps producing events — even
+// slowly, e.g. gpt-5.6-sol at effort=xhigh on a large diff routinely runs
+// well past 10 minutes while still making progress — is never killed by the
+// idle budget alone. This ceiling exists only to catch the case the idle
+// budget can't: a turn that resets its own idle timer forever without ever
+// completing (e.g. a runaway tool-call loop). It is intentionally generous
+// and is not meant to be tuned per-call the way the idle budget is.
+const HARD_WALL_CLOCK_CEILING_MS = 45 * 60 * 1000;
+
+// Resolve the per-turn idle budget at CALL time, not import time. The
+// companion sets CODEX_TURN_TIMEOUT_MS (e.g. the foreground budget, below
+// the Bash ceiling) AFTER this module is imported; reading it at import
+// froze the value at the default and made --turn-timeout-ms / the
+// foreground budget inert.
+//
+// This budget measures INACTIVITY, not total turn duration: it resets on
+// every turn/started, item/started, and item/completed notification (see
+// applyTurnNotification -> resetIdleDeadline). A turn that keeps producing
+// events can run indefinitely; only a gap this long with no events at all
+// trips it. A separate, much larger HARD_WALL_CLOCK_CEILING_MS backstops a
+// turn that never stops resetting its own idle timer.
 function resolveTurnTimeoutMs(options = {}) {
   const fromOptions = Number(options.turnTimeoutMs);
   if (Number.isFinite(fromOptions) && fromOptions > 0) {
@@ -383,6 +406,7 @@ function createTurnCaptureState(threadId, options = {}) {
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
     completionTimer: null,
+    resetIdleDeadline: null,
     lastAgentMessage: "",
     reviewText: "",
     reasoningSummary: [],
@@ -561,6 +585,7 @@ function applyTurnNotification(state, message) {
       });
       break;
     case "turn/started":
+      state.resetIdleDeadline?.();
       registerThread(state, message.params.threadId);
       state.threadTurnIds.set(message.params.threadId, message.params.turn.id);
       if ((message.params.threadId ?? null) !== state.threadId) {
@@ -579,6 +604,7 @@ function applyTurnNotification(state, message) {
       );
       break;
     case "item/started":
+      state.resetIdleDeadline?.();
       recordItem(state, message.params.item, "started", message.params.threadId ?? null);
       {
         const update = describeStartedItem(state, message.params.item);
@@ -586,11 +612,29 @@ function applyTurnNotification(state, message) {
       }
       break;
     case "item/completed":
+      state.resetIdleDeadline?.();
       recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
       {
         const update = describeCompletedItem(state, message.params.item);
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
+      break;
+    // In-item progress/delta notifications: a single item (a long command
+    // execution, an MCP tool call, streamed model/reasoning output) can run
+    // well past the idle budget while continuously producing these without
+    // ever emitting another item/started or item/completed in between. Treat
+    // them as activity too, or a genuinely progressing item gets interrupted
+    // mid-flight — the exact failure mode this idle timeout exists to avoid.
+    case "item/commandExecution/outputDelta":
+    case "item/fileChange/outputDelta":
+    case "item/mcpToolCall/progress":
+    case "item/agentMessage/delta":
+    case "item/plan/delta":
+    case "item/reasoning/summaryTextDelta":
+    case "item/reasoning/textDelta":
+    case "command/exec/outputDelta":
+    case "process/outputDelta":
+      state.resetIdleDeadline?.();
       break;
     case "error":
       state.error = message.params.error;
@@ -640,15 +684,39 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   });
 
   try {
-    // Arm the deadline BEFORE startRequest so a stalled turn/start (app-server
-    // alive but not responding) is also bounded. Finding #27-2.
-    const turnTimeoutMs = resolveTurnTimeoutMs(options);
-    let deadlineTimer = null;
-    const deadline = new Promise((_resolve, reject) => {
-      deadlineTimer = setTimeout(() => {
-        reject(new Error(`codex turn exceeded the ${turnTimeoutMs}ms turn budget.`));
-      }, turnTimeoutMs);
-      deadlineTimer.unref?.();
+    // Arm the idle deadline BEFORE startRequest so a stalled turn/start
+    // (app-server alive but not responding) is also bounded. Finding #27-2.
+    // Unlike a fixed whole-turn budget, this deadline is RESET on every
+    // turn/started, item/started, and item/completed notification (wired via
+    // state.resetIdleDeadline, consumed in applyTurnNotification) — it only
+    // fires after a gap of silence at least this long, not after a fixed
+    // amount of total turn time.
+    const idleTimeoutMs = resolveTurnTimeoutMs(options);
+    let idleTimer = null;
+    let rejectIdleDeadline = null;
+    const armIdleDeadline = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        rejectIdleDeadline?.(new Error(`codex turn exceeded the ${idleTimeoutMs}ms turn budget.`));
+      }, idleTimeoutMs);
+      idleTimer.unref?.();
+    };
+    const idleDeadline = new Promise((_resolve, reject) => {
+      rejectIdleDeadline = reject;
+      armIdleDeadline();
+    });
+    state.resetIdleDeadline = armIdleDeadline;
+
+    // Coarse wall-clock failsafe: never reset, catches a turn that keeps
+    // resetting its own idle timer forever without ever completing.
+    let wallClockTimer = null;
+    const wallClockCeiling = new Promise((_resolve, reject) => {
+      wallClockTimer = setTimeout(() => {
+        reject(new Error(`codex turn exceeded the ${HARD_WALL_CLOCK_CEILING_MS}ms hard wall-clock ceiling.`));
+      }, HARD_WALL_CLOCK_CEILING_MS);
+      wallClockTimer.unref?.();
     });
 
     // Wire exitPromise to rejectCompletion so an app-server death at any point
@@ -664,7 +732,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 
     let result;
     try {
-      // Race the entire lifecycle (startRequest + completion) against the deadline.
+      // Race the entire lifecycle (startRequest + completion) against the
+      // idle deadline and the wall-clock failsafe.
       result = await Promise.race([
         (async () => {
           const response = await startRequest();
@@ -690,7 +759,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 
           return await state.completion;
         })(),
-        deadline
+        idleDeadline,
+        wallClockCeiling
       ]);
     } catch (error) {
       // Finding #27-1: on deadline, interrupt the in-flight turn so the broker
@@ -705,12 +775,16 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       }
       throw error;
     } finally {
-      if (deadlineTimer) {
-        clearTimeout(deadlineTimer);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      if (wallClockTimer) {
+        clearTimeout(wallClockTimer);
       }
     }
     return result;
   } finally {
+    state.resetIdleDeadline = null;
     clearCompletionTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
   }

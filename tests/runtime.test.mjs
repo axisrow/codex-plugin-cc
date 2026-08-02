@@ -3177,3 +3177,80 @@ test("task with stalled turn/start times out via --turn-timeout-ms instead of ha
   const storedJob = readPersistedJob(repo);
   assert.equal(storedJob.status, "failed", "job must be marked failed");
 });
+
+test("task with spaced-out events longer than the budget does NOT time out (idle, not wall-clock)", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "spaced-events-idle-ok");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // Fixture emits 6 events spaced 700ms apart (~4.2s total) — longer than this
+  // 2s budget, but every individual gap is well under it. Under an idle
+  // (inactivity) timeout this must succeed; under the old wall-clock design
+  // it would fail once the 4.2s of total turn time exceeded the 2s budget.
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, `must succeed despite total turn time exceeding the budget: ${result.stderr}`);
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-flight");
+});
+
+test("task that goes silent after the first event times out via the idle budget, measured from the last event", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "goes-silent-after-first-event");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const start = Date.now();
+  // Fixture sends turn/started + one item/started, then never speaks again.
+  // A 3s idle budget must fire ~3s after that last event, not hang toward a
+  // full-turn budget counted from turn start (there is none here to expire
+  // against under the old design other than the same 3s, but the assertion
+  // below pins the behavior explicitly: bounded and fast).
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "3000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0, "must exit non-zero once idle for longer than the budget");
+  assert.match(result.stderr, /turn budget/i, "error must mention the turn budget");
+  assert.ok(elapsedMs < 15000, `must time out close to the idle budget, not hang (took ${elapsedMs}ms)`);
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "failed", "job must be marked failed");
+});
+
+test("task with in-item output-delta progress longer than the budget does NOT time out (single long item, idle not wall-clock)", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "single-item-progress-idle-ok");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // Fixture emits one item/started, then 6 item/commandExecution/outputDelta
+  // notifications spaced 700ms apart (~4.2s total) with no other item/started
+  // or item/completed in between, then completes. The gap between the initial
+  // item/started and the first delta (and each subsequent delta) is well
+  // under the 2s budget, but the total span from item/started to the final
+  // item/completed exceeds it. Must NOT time out: in-item progress deltas
+  // must reset the idle deadline just like item boundaries do.
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, `must succeed despite one long item spanning the budget: ${result.stderr}`);
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-item");
+});
