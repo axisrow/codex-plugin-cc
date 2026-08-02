@@ -813,7 +813,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       if (state.threadId && state.turnId && options.cwd) {
         await interruptAppServerTurn(options.cwd, {
           threadId: state.threadId,
-          turnId: state.turnId
+          turnId: state.turnId,
+          timeoutMs: TURN_INTERRUPT_TIMEOUT_MS
         }).catch(() => {});
       }
       throw error;
@@ -1186,7 +1187,26 @@ export async function getCodexAuthStatus(cwd, options = {}) {
   }
 }
 
-export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
+// A control-plane RPC (send-interrupt-and-acknowledge), not agent work — it
+// must not hang the way a turn can. Callers that gate a state transition on
+// the result (e.g. /codex:cancel finalizing an orphaned job) need a bounded
+// wait so a stuck broker/transport fails fast instead of leaving the caller
+// stalled indefinitely on this await. CODEX_INTERRUPT_TIMEOUT_MS lets tests
+// shrink this the same way CODEX_TURN_TIMEOUT_MS overrides the turn budget.
+const DEFAULT_INTERRUPT_TIMEOUT_MS = 15000;
+
+function resolveInterruptTimeoutMs(timeoutMs) {
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    return timeoutMs;
+  }
+  const fromEnv = Number(process.env.CODEX_INTERRUPT_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return DEFAULT_INTERRUPT_TIMEOUT_MS;
+}
+
+export async function interruptAppServerTurn(cwd, { threadId, turnId, timeoutMs } = {}) {
   if (!threadId || !turnId) {
     return {
       attempted: false,
@@ -1206,6 +1226,8 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
     };
   }
 
+  const resolvedTimeoutMs = resolveInterruptTimeoutMs(timeoutMs);
+
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd, {
@@ -1213,10 +1235,10 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
       allowBusyStaleBroker: true
     });
     await client.request("turn/interrupt", { threadId, turnId }, {
-      timeoutMs: TURN_INTERRUPT_TIMEOUT_MS,
+      timeoutMs: resolvedTimeoutMs,
       // A wedged peer that accepted the connection but goes silent must not
       // linger past the timeout: force-close so callers aren't blocked
-      // beyond TURN_INTERRUPT_TIMEOUT_MS regardless of transport.
+      // beyond resolvedTimeoutMs regardless of transport.
       onTimeout: () => client?.close().catch(() => {})
     });
     return {

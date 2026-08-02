@@ -927,6 +927,14 @@ rl.on("line", (line) => {
 	      }
 
 	      case "turn/interrupt": {
+	        if (BEHAVIOR === "stalled-interrupt") {
+	          // Never respond — simulates a wedged/hung broker or app-server during
+	          // turn/interrupt. interruptAppServerTurn() must bound this request
+	          // (DEFAULT_INTERRUPT_TIMEOUT_MS) instead of hanging forever, so a
+	          // caller gating a state transition on the result (e.g. /codex:cancel
+	          // finalizing an orphaned job) is never left stuck.
+	          break;
+	        }
 	        state.lastInterrupt = {
 	          threadId: message.params.threadId,
 	          turnId: message.params.turnId
@@ -1007,6 +1015,9 @@ export function buildEnv(binDir) {
     CLAUDE_PLUGIN_DATA: getTestPluginDataDir(),
     // Production keeps an idle broker warm for 15 minutes. Tests only need a
     // brief reuse window and should not leave dozens of detached helpers.
-    CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "2000"
+    CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "2000",
+    // Production bounds a stuck turn/interrupt request at 15s. Tests exercising
+    // a hung interrupt (BEHAVIOR "stalled-interrupt") should not wait that long.
+    CODEX_INTERRUPT_TIMEOUT_MS: "1000"
   };
 }

@@ -2399,6 +2399,42 @@ test("cancel does not finalize an orphaned job as cancelled when the remote turn
   assert.match(retryResult.stderr, /remote Codex turn interrupt failed/i);
 });
 
+test("cancel on an orphaned job does not persist cancelled while the remote interrupt is still hung, and stays retryable once it times out", () => {
+  const workspace = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-interrupt");
+  const env = buildEnv(binDir);
+  const { stateDir, logFile, jobFile } = writeOrphanedJobFixture(workspace);
+
+  const statusResult = run("node", [SCRIPT, "status", "--json"], { cwd: workspace, env });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const reconciled = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.id === "task-orphaned"
+  );
+  assert.equal(reconciled.status, "failed");
+
+  // The fake broker never answers turn/interrupt. Without a bounded timeout on
+  // that request, /codex:cancel would hang here; with one, it must return
+  // (non-zero) once the timeout fires rather than persisting "cancelled" before
+  // the interrupt is confirmed.
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace,
+    env
+  });
+
+  assert.notEqual(cancelResult.status, 0);
+  assert.match(cancelResult.stderr, /remote Codex turn interrupt failed/i);
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const stillOrphaned = state.jobs.find((job) => job.id === "task-orphaned");
+  assert.equal(stillOrphaned.status, "failed");
+  assert.equal(stillOrphaned.errorMessage, "Process exited without reporting.");
+
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "failed");
+  assert.match(fs.readFileSync(logFile, "utf8"), /remote Codex turn interrupt failed/i);
+});
+
 test("failed cancellation restores a live job so cancellation can be retried", () => {
   const workspace = makeTempDir();
   const job = {
