@@ -64,14 +64,14 @@ const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
 
 // Coarse wall-clock failsafe, independent of the idle budget. The idle timer
-// resets on every turn/started, item/started, and item/completed
-// notification, so a turn that keeps producing events — even slowly, e.g.
-// gpt-5.6-sol at effort=xhigh on a large diff routinely runs well past 10
-// minutes while still making progress — is never killed by the idle budget
-// alone. This ceiling exists only to catch the case the idle budget can't:
-// a turn that resets its own idle timer forever without ever completing
-// (e.g. a runaway tool-call loop). It is intentionally generous and is not
-// meant to be tuned per-call the way the idle budget is.
+// resets on every turn/started, item/started, item/completed, and in-item
+// progress/delta notification, so a turn that keeps producing events — even
+// slowly, e.g. gpt-5.6-sol at effort=xhigh on a large diff routinely runs
+// well past 10 minutes while still making progress — is never killed by the
+// idle budget alone. This ceiling exists only to catch the case the idle
+// budget can't: a turn that resets its own idle timer forever without ever
+// completing (e.g. a runaway tool-call loop). It is intentionally generous
+// and is not meant to be tuned per-call the way the idle budget is.
 const HARD_WALL_CLOCK_CEILING_MS = 45 * 60 * 1000;
 
 // Resolve the per-turn idle budget at CALL time, not import time. The
