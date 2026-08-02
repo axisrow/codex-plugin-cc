@@ -3254,3 +3254,30 @@ test("task with in-item output-delta progress longer than the budget does NOT ti
   const storedJob = readPersistedJob(repo);
   assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-item");
 });
+
+test("adversarial review with stalled turn/start times out via --turn-timeout-ms instead of hanging on the 600s default", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-turn-start");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const start = Date.now();
+  // adversarial-review routes through runAppServerTurn (unlike native `review`,
+  // which uses runAppServerReview). turnTimeoutMs must reach that call too —
+  // without it, this hangs toward the library's 600000ms default instead of
+  // the 3s budget requested here.
+  const result = run("node", [SCRIPT, "adversarial-review", "--turn-timeout-ms", "3000"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0, "must exit non-zero on timeout, not hang");
+  assert.match(result.stderr, /turn budget/i, "error must mention the turn budget");
+  assert.ok(elapsedMs < 15000, `must time out close to the requested budget, not the 600s default (took ${elapsedMs}ms)`);
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "failed", "job must be marked failed");
+});
