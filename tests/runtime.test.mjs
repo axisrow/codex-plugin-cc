@@ -3282,6 +3282,122 @@ test("task with in-item output-delta progress longer than the budget does NOT ti
   assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-item");
 });
 
+test("a continuously-progressing turn is still bounded by the hard wall-clock ceiling, and the turn is interrupted", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "long-progress-hits-wall-clock-ceiling");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // The fixture streams an outputDelta every 500ms for ~20s, so the 2s idle
+  // budget is reset continuously and never fires. Only the hard wall-clock
+  // ceiling can stop this turn. Before the fix that ceiling was the fixed
+  // 45-minute HARD_WALL_CLOCK_CEILING_MS constant, so the turn ran to
+  // completion (~20s) and this test failed on both the status and the elapsed
+  // assertions. With the ceiling configurable, 3500ms must cut it.
+  const start = Date.now();
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CODEX_TURN_HARD_CEILING_MS: "3500" }
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0, "must fail via the wall-clock ceiling, not complete");
+  assert.match(
+    result.stderr,
+    /hard wall-clock ceiling/i,
+    `must report the ceiling, not the idle budget: ${result.stderr}`
+  );
+  assert.ok(
+    elapsedMs < 15000,
+    `must be cut at the ~3.5s ceiling, not run the fixture's full ~20s (took ${elapsedMs}ms)`
+  );
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "failed", "job must be marked failed");
+
+  // The catch block must reach interruptAppServerTurn so the broker stops
+  // executing a turn we have already reported as failed.
+  const fixtureState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.ok(fixtureState.lastInterrupt, "the timed-out turn must be interrupted on the app-server");
+});
+
+test("a foreground turn's wall-clock ceiling stays below the host's Bash SIGKILL", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "long-progress-hits-wall-clock-ceiling");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // Same continuously-progressing fixture, driven through the FOREGROUND path
+  // (no --background). Before the fix the ceiling was the fixed 45-minute
+  // constant, so a foreground turn that keeps producing events could outlive
+  // Claude Code's ~120s Bash SIGKILL — killed before captureTurn's catch could
+  // send turn/interrupt, orphaning a live turn on the broker. Asserting the
+  // resolved number directly would mean leaking it into user-facing output, so
+  // this drives the observable behaviour instead: with the ceiling lowered to
+  // 2500ms via the env override, a foreground run must be cut by the ceiling
+  // (not by the 2s idle budget, which the deltas keep resetting) and must
+  // interrupt the turn. That only holds if the foreground path honours a
+  // configurable ceiling at all.
+  const start = Date.now();
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CODEX_TURN_HARD_CEILING_MS: "2500" }
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0, "foreground turn must be cut by its ceiling");
+  assert.match(result.stderr, /hard wall-clock ceiling/i, `must cite the ceiling: ${result.stderr}`);
+  assert.ok(elapsedMs < 15000, `must be cut at the ceiling, not run ~20s (took ${elapsedMs}ms)`);
+  const fixtureState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.ok(fixtureState.lastInterrupt, "foreground timeout must still interrupt the turn");
+});
+
+test("a long reasoning stretch keeps the turn alive: reasoning deltas are not opted out at handshake", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "reasoning-delta-idle-ok");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // This is the exact gpt-5.6-sol/effort=xhigh case #40 was filed for: a long
+  // reasoning stretch whose ONLY liveness signal is reasoning summary deltas.
+  // Those were listed in DEFAULT_CAPABILITIES.optOutNotificationMethods, so
+  // the server never sent them, applyTurnNotification never reset the idle
+  // deadline, and the turn was killed mid-reasoning despite being alive.
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(
+    result.status,
+    0,
+    `a reasoning stretch spanning the idle budget must not time out: ${result.stderr}`
+  );
+  const storedJob = readPersistedJob(repo);
+  assert.equal(storedJob.status, "completed", "job must complete, not be killed mid-reasoning");
+
+  // Assert the cause directly, not just the symptom: the handshake must no
+  // longer opt out of the three delta methods that carry liveness.
+  const fixtureState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const optedOut = fixtureState.capabilities?.optOutNotificationMethods ?? [];
+  for (const method of ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"]) {
+    assert.ok(!optedOut.includes(method), `${method} must not be opted out — it is a liveness signal`);
+  }
+  // The boundary marker stays opted out: it is not a reset source.
+  assert.ok(
+    optedOut.includes("item/reasoning/summaryPartAdded"),
+    "item/reasoning/summaryPartAdded must stay opted out (boundary marker, not a delta)"
+  );
+});
+
 test("adversarial review with stalled turn/start times out via --turn-timeout-ms instead of hanging on the 600s default", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

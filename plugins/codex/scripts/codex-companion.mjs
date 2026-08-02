@@ -76,6 +76,17 @@ const TASK_WORKER_RECORD_WAIT_TIMEOUT_MS = 1000;
 const FOREGROUND_TURN_TIMEOUT_MS = 110000;
 // Background runs have no external Bash ceiling — give them the full default budget.
 const DEFAULT_TURN_TIMEOUT_MS = 600000;
+// Hard wall-clock ceiling: a second, non-resettable failsafe under the idle
+// budget above. The idle deadline is reset by every notification, so a turn
+// that keeps producing events can run indefinitely — correct for background
+// work, but fatal in the foreground, where Claude Code's Bash tool SIGKILLs
+// node at ~120s. A foreground turn that sails past that is killed before
+// captureTurn's catch can send turn/interrupt, orphaning a live, possibly
+// write-capable turn on the broker. So the foreground ceiling stays below the
+// host kill (matching FOREGROUND_TURN_TIMEOUT_MS), while background keeps a
+// generous ceiling that only catches a runaway turn resetting its own timer
+// forever. Closes #43.
+const DEFAULT_TURN_HARD_CEILING_MS = 45 * 60 * 1000;
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const VALID_REASONING_EFFORTS = new Set(REASONING_EFFORTS);
 const MODEL_ALIASES = new Map([
@@ -422,6 +433,7 @@ async function executeReviewRun(request) {
       model: request.model,
       effort: request.effort,
       turnTimeoutMs: request.turnTimeoutMs,
+      hardCeilingMs: request.hardCeilingMs,
       onProgress: request.onProgress
     });
     const payload = {
@@ -471,6 +483,7 @@ async function executeReviewRun(request) {
     onProgress: request.onProgress,
     persistThread: true,
     turnTimeoutMs: request.turnTimeoutMs,
+    hardCeilingMs: request.hardCeilingMs,
     threadName: `Codex Companion Review: ${context.target.label}`.slice(0, 80)
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
@@ -551,6 +564,7 @@ async function executeTaskRun(request) {
     onProgress: request.onProgress,
     persistThread: true,
     turnTimeoutMs: request.turnTimeoutMs,
+    hardCeilingMs: request.hardCeilingMs,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
 
@@ -662,7 +676,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, readOnly, resumeLast, jobId, turnTimeoutMs }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, readOnly, resumeLast, jobId, turnTimeoutMs, hardCeilingMs }) {
   return {
     cwd,
     model,
@@ -672,7 +686,8 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, readOnly, resumeL
     readOnly,
     resumeLast,
     jobId,
-    turnTimeoutMs
+    turnTimeoutMs,
+    hardCeilingMs
   };
 }
 
@@ -709,8 +724,10 @@ async function executeTransfer(cwd, options = {}) {
 // item/completed, or in-item progress/delta notification) before it's
 // considered dead — NOT a budget for the turn's total duration. A turn that
 // keeps producing events can run far longer than this value without being
-// killed; see HARD_WALL_CLOCK_CEILING_MS in lib/codex.mjs for the separate,
-// much larger backstop on that case.
+// killed; see resolveTurnHardCeilingMsFromOptions below (and
+// DEFAULT_HARD_WALL_CLOCK_CEILING_MS in lib/codex.mjs) for the separate
+// wall-clock backstop on that case — generous in the background, but equal to
+// this foreground budget in the foreground, where it must stay under the host kill.
 // Foreground default is just under the Bash-tool ceiling (110s) so a stalled turn
 // returns a structured error instead of being SIGKILLed. Background gets the full
 // 600s default (no external ceiling to collide with).
@@ -724,6 +741,19 @@ function resolveTurnTimeoutMsFromOptions(options) {
     return fromEnv;
   }
   return options.background ? DEFAULT_TURN_TIMEOUT_MS : FOREGROUND_TURN_TIMEOUT_MS;
+}
+
+// Resolve the hard wall-clock ceiling (see DEFAULT_TURN_HARD_CEILING_MS).
+// Precedence mirrors resolveTurnTimeoutMsFromOptions: env override first (for
+// tests and non-Claude hosts with a different external ceiling), then the
+// foreground/background default. There is no CLI flag — the ceiling is a
+// safety property of the host, not something a caller should tune per-run.
+function resolveTurnHardCeilingMsFromOptions(options) {
+  const fromEnv = Number(process.env.CODEX_TURN_HARD_CEILING_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return options.background ? DEFAULT_TURN_HARD_CEILING_MS : FOREGROUND_TURN_TIMEOUT_MS;
 }
 
 function readTaskPrompt(cwd, options, positionals) {
@@ -837,6 +867,7 @@ async function handleReviewCommand(argv, config) {
         focusText,
         reviewName: config.reviewName,
         turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
+        hardCeilingMs: resolveTurnHardCeilingMsFromOptions(options),
         onProgress: progress
       }),
     { json: options.json }
@@ -895,7 +926,8 @@ async function handleTask(argv) {
       readOnly,
       resumeLast,
       jobId: job.id,
-      turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options)
+      turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
+      hardCeilingMs: resolveTurnHardCeilingMsFromOptions(options)
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -916,6 +948,7 @@ async function handleTask(argv) {
         resumeLast,
         jobId: job.id,
         turnTimeoutMs: resolveTurnTimeoutMsFromOptions(options),
+        hardCeilingMs: resolveTurnHardCeilingMsFromOptions(options),
         onProgress: progress
       }),
     { json: options.json }
