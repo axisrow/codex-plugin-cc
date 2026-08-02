@@ -1651,6 +1651,7 @@ test("status shows phases, hints, and the latest finished job", () => {
             title: "Codex Review",
             jobClass: "review",
             phase: "reviewing",
+            sessionId: "sess-current",
             threadId: "thr_1",
             summary: "Review working tree diff",
             logFile,
@@ -1662,6 +1663,7 @@ test("status shows phases, hints, and the latest finished job", () => {
             status: "completed",
             title: "Codex Review",
             jobClass: "review",
+            sessionId: "sess-current",
             threadId: "thr_done",
             summary: "Review main...HEAD",
             createdAt: "2026-03-18T15:10:00.000Z",
@@ -1677,8 +1679,15 @@ test("status shows phases, hints, and the latest finished job", () => {
     "utf8"
   );
 
+  // Bare `status` filters to the current Claude session, so pin the session id on
+  // both the fixture jobs and the child env — otherwise the host's exported
+  // CODEX_COMPANION_SESSION_ID leaks in and filters these jobs away.
   const result = run("node", [SCRIPT, "status"], {
-    cwd: workspace
+    cwd: workspace,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: "sess-current"
+    }
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -1794,6 +1803,7 @@ test("status preserves adversarial review kind labels", () => {
             title: "Codex Adversarial Review",
             jobClass: "review",
             phase: "reviewing",
+            sessionId: "sess-current",
             threadId: "thr_adv_live",
             summary: "Adversarial review current changes",
             logFile,
@@ -1806,6 +1816,7 @@ test("status preserves adversarial review kind labels", () => {
             status: "completed",
             title: "Codex Adversarial Review",
             jobClass: "review",
+            sessionId: "sess-current",
             threadId: "thr_adv_done",
             summary: "Adversarial review working tree diff",
             createdAt: "2026-03-18T15:10:00.000Z",
@@ -1821,8 +1832,14 @@ test("status preserves adversarial review kind labels", () => {
     "utf8"
   );
 
+  // See the note on the `status shows phases` test: bare `status` is
+  // session-filtered, so the session id is pinned on both sides.
   const result = run("node", [SCRIPT, "status"], {
-    cwd: workspace
+    cwd: workspace,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: "sess-current"
+    }
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -1992,6 +2009,7 @@ test("result returns the stored output for the latest finished job by default", 
             status: "completed",
             title: "Codex Review",
             jobClass: "review",
+            sessionId: "sess-current",
             threadId: "thr_review_finished",
             summary: "Review working tree diff",
             createdAt: "2026-03-18T15:00:00.000Z",
@@ -2005,8 +2023,17 @@ test("result returns the stored output for the latest finished job by default", 
     "utf8"
   );
 
+  // `result` with no job id filters to the current Claude session
+  // (filterJobsForCurrentSession in job-control.mjs). That filter is a no-op only
+  // when CODEX_COMPANION_SESSION_ID is unset, so a bare run() inherits whatever
+  // the host session exports and drops this fixture job — green in CI, red inside
+  // a Claude Code session. Pin both sides instead of relying on the ambient value.
   const result = run("node", [SCRIPT, "result"], {
-    cwd: workspace
+    cwd: workspace,
+    env: {
+      ...process.env,
+      CODEX_COMPANION_SESSION_ID: "sess-current"
+    }
   });
 
   assert.equal(result.status, 0, result.stderr);
