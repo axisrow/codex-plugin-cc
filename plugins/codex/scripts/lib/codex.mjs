@@ -52,6 +52,15 @@ const REVIEW_THREAD_PREFIX = "Codex Companion Review";
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 
+// Bound turn/interrupt itself (#47 finding 2). It is awaited inside
+// captureTurn's catch, in a window that by construction has only the
+// wall-clock ceiling's cleanup margin left before the host's own SIGKILL
+// (see DEFAULT_HARD_WALL_CLOCK_CEILING_MS below). Without a deadline here, a
+// broker that accepts the connection and then goes silent blocks the
+// companion until the host kills it, and the original turn keeps running
+// with nobody able to reach it.
+const TURN_INTERRUPT_TIMEOUT_MS = 5000;
+
 // Hard upper bound on Codex agent inactivity within a single turn. Without
 // this, the completion await at the end of captureTurn is unbounded: it is
 // resolved ONLY by completeTurn() and is never rejected on a stalled/dead
@@ -1203,7 +1212,13 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
       reuseExistingBroker: true,
       allowBusyStaleBroker: true
     });
-    await client.request("turn/interrupt", { threadId, turnId });
+    await client.request("turn/interrupt", { threadId, turnId }, {
+      timeoutMs: TURN_INTERRUPT_TIMEOUT_MS,
+      // A wedged peer that accepted the connection but goes silent must not
+      // linger past the timeout: force-close so callers aren't blocked
+      // beyond TURN_INTERRUPT_TIMEOUT_MS regardless of transport.
+      onTimeout: () => client?.close().catch(() => {})
+    });
     return {
       attempted: true,
       interrupted: true,
