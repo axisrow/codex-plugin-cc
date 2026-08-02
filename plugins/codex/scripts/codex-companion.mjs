@@ -724,8 +724,10 @@ async function executeTransfer(cwd, options = {}) {
 // item/completed, or in-item progress/delta notification) before it's
 // considered dead — NOT a budget for the turn's total duration. A turn that
 // keeps producing events can run far longer than this value without being
-// killed; see HARD_WALL_CLOCK_CEILING_MS in lib/codex.mjs for the separate,
-// much larger backstop on that case.
+// killed; see resolveTurnHardCeilingMsFromOptions below (and
+// DEFAULT_HARD_WALL_CLOCK_CEILING_MS in lib/codex.mjs) for the separate
+// wall-clock backstop on that case — generous in the background, but equal to
+// this foreground budget in the foreground, where it must stay under the host kill.
 // Foreground default is just under the Bash-tool ceiling (110s) so a stalled turn
 // returns a structured error instead of being SIGKILLed. Background gets the full
 // 600s default (no external ceiling to collide with).
