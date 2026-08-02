@@ -18,6 +18,8 @@ export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
 export const CANCELLATION_TERMINATION_FAILED_MESSAGE =
   "Cancellation requested but process termination failed; retry /codex:cancel.";
+export const CANCELLATION_INTERRUPT_REQUIRED_MESSAGE =
+  "Cancellation requested but the remote Codex turn interrupt failed; retry /codex:cancel.";
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -331,7 +333,7 @@ export function resolveResultJob(cwd, reference) {
   throw new Error("No finished Codex jobs found for this repository yet.");
 }
 
-function isOrphanedTurn(job) {
+export function isOrphanedTurn(job) {
   return (
     job.status === "failed" &&
     job.errorMessage === UNREPORTED_PROCESS_EXIT_MESSAGE &&

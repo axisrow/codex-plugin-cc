@@ -35,6 +35,8 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  CANCELLATION_INTERRUPT_REQUIRED_MESSAGE,
+  isOrphanedTurn,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -1146,6 +1148,33 @@ async function handleCancel(argv) {
         ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
         : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
     );
+  }
+
+  if (isOrphanedTurn(job) && !interrupt.interrupted) {
+    // Restore the exact orphan marker (status/errorMessage) so isOrphanedTurn keeps matching
+    // this job on a retried /codex:cancel — only the interrupt result, not the retry gate, failed.
+    const restoredJob = {
+      ...existing,
+      ...job,
+      status: job.status,
+      phase: job.phase ?? existing.phase ?? job.status,
+      pid: null,
+      errorMessage: job.errorMessage
+    };
+    writeJobFile(workspaceRoot, job.id, restoredJob);
+    upsertJob(workspaceRoot, {
+      ...job,
+      status: job.status,
+      phase: restoredJob.phase,
+      pid: null,
+      completedAt: job.completedAt ?? null,
+      cancelledAt: null,
+      errorMessage: job.errorMessage
+    });
+    const detail = interrupt.detail ? `: ${interrupt.detail}` : ".";
+    const message = `${CANCELLATION_INTERRUPT_REQUIRED_MESSAGE}${detail}`;
+    appendLogLine(job.logFile, message);
+    throw new Error(message);
   }
 
   let termination = null;
