@@ -33,6 +33,17 @@ const BROKER_CONNECT_TIMEOUT_MS = 2000;
 const BROKER_INITIALIZE_TIMEOUT_MS = 5000;
 const SPAWNED_INITIALIZE_TIMEOUT_MS = 10000;
 
+// Bound the broker socket's graceful close the same way the spawned client
+// already bounds its own (close()'s 50ms killChildNow() fallback below).
+// socket.end() sends FIN and waits for the peer to also close — if the peer
+// stays alive and ignores it, exitPromise never resolves and close() hangs
+// indefinitely. destroy()ing after a short grace period forces the "close"
+// event (-> handleExit) so close() always returns, mirroring the spawned
+// client's kill fallback. See #47 finding 2 (Codex review on PR #48): a
+// caller's own request-level timeoutMs is not a real bound if close() itself
+// can hang past it.
+const BROKER_CLOSE_GRACE_MS = 50;
+
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
   title: "Codex Plugin",
@@ -399,6 +410,11 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     this.closed = true;
     if (this.socket) {
       this.socket.end();
+      setTimeout(() => {
+        if (!this.exitResolved) {
+          this.socket?.destroy();
+        }
+      }, BROKER_CLOSE_GRACE_MS).unref?.();
     }
     await this.exitPromise;
   }
