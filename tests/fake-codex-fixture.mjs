@@ -828,6 +828,96 @@ rl.on("line", (line) => {
 	            setTimeout(tick, gapMs);
 	          };
 	          setTimeout(tick, gapMs);
+	        } else if (BEHAVIOR === "long-progress-hits-wall-clock-ceiling") {
+	          // Continuously-progressing turn: one item/started, then a
+	          // commandExecution outputDelta every 500ms for ~20s. Every delta
+	          // resets the idle deadline, so the idle budget alone never fires --
+	          // only the separate hard wall-clock ceiling can stop this turn.
+	          // Registered as interruptible so turn/interrupt is observable.
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({
+	            method: "item/started",
+	            params: {
+	              threadId: thread.id,
+	              turnId,
+	              item: { type: "commandExecution", id: "cmd_" + turnId, command: "very long step", status: "inProgress" }
+	            }
+	          });
+	          const ceilingGapMs = 500;
+	          const ceilingDeltaCount = 40;
+	          let ceilingStep = 0;
+	          const ceilingTick = () => {
+	            ceilingStep += 1;
+	            send({
+	              method: "item/commandExecution/outputDelta",
+	              params: { threadId: thread.id, turnId, itemId: "cmd_" + turnId, delta: "chunk " + ceilingStep + "\\n" }
+	            });
+	            if (ceilingStep >= ceilingDeltaCount) {
+	              send({
+	                method: "item/completed",
+	                params: {
+	                  threadId: thread.id,
+	                  turnId,
+	                  item: { type: "commandExecution", id: "cmd_" + turnId, command: "very long step", status: "completed" }
+	                }
+	              });
+	              send({
+	                method: "item/completed",
+	                params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" } }
+	              });
+	              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+	              interruptibleTurns.delete(turnId);
+	              return;
+	            }
+	            const nextTimer = setTimeout(ceilingTick, ceilingGapMs);
+	            interruptibleTurns.set(turnId, { threadId: thread.id, timer: nextTimer });
+	          };
+	          const firstCeilingTimer = setTimeout(ceilingTick, ceilingGapMs);
+	          interruptibleTurns.set(turnId, { threadId: thread.id, timer: firstCeilingTimer });
+	        } else if (BEHAVIOR === "reasoning-delta-idle-ok") {
+	          // The gpt-5.6-sol/xhigh case #40 was filed for: a long reasoning
+	          // stretch whose ONLY liveness signal is reasoning summary deltas.
+	          // Those are opt-ed out at handshake by default, so before the fix
+	          // the client never sees them and the idle budget kills the turn.
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({
+	            method: "item/started",
+	            params: {
+	              threadId: thread.id,
+	              turnId,
+	              item: { type: "reasoning", id: "rsn_" + turnId, status: "inProgress" }
+	            }
+	          });
+	          const reasoningGapMs = 700;
+	          const reasoningDeltaCount = 6;
+	          let reasoningStep = 0;
+	          const reasoningTick = () => {
+	            reasoningStep += 1;
+	            send({
+	              method: "item/reasoning/summaryTextDelta",
+	              params: {
+	                threadId: thread.id,
+	                turnId,
+	                itemId: "rsn_" + turnId,
+	                delta: "thinking " + reasoningStep + "\\n",
+	                summaryIndex: 0
+	              }
+	            });
+	            if (reasoningStep >= reasoningDeltaCount) {
+	              send({
+	                method: "item/completed",
+	                params: { threadId: thread.id, turnId, item: { type: "reasoning", id: "rsn_" + turnId, status: "completed" } }
+	              });
+	              send({
+	                method: "item/completed",
+	                params: { threadId: thread.id, turnId, item: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" } }
+	              });
+	              send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+	              return;
+	            }
+	            setTimeout(reasoningTick, reasoningGapMs);
+	          };
+	          setTimeout(reasoningTick, reasoningGapMs);
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }

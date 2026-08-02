@@ -44,12 +44,15 @@ const DEFAULT_CLIENT_INFO = {
 const DEFAULT_CAPABILITIES = {
   experimentalApi: false,
   requestAttestation: false,
-  optOutNotificationMethods: [
-    "item/agentMessage/delta",
-    "item/reasoning/summaryTextDelta",
-    "item/reasoning/summaryPartAdded",
-    "item/reasoning/textDelta"
-  ]
+  // Only opt out of notifications we neither render nor need. The streaming
+  // text deltas (agentMessage, reasoning summary/text) are deliberately NOT
+  // opted out: captureTurn's idle deadline treats every notification as proof
+  // of life, and during a long reasoning stretch these deltas are the ONLY
+  // liveness signal the server emits — no item boundary arrives for minutes.
+  // Opting them out made the client blind to a working agent and killed the
+  // turn mid-reasoning (the gpt-5.6-sol/effort=xhigh case behind #40).
+  // summaryPartAdded stays opted out: it is a boundary marker, not a delta.
+  optOutNotificationMethods: ["item/reasoning/summaryPartAdded"]
 };
 
 function buildJsonRpcError(code, message, data) {

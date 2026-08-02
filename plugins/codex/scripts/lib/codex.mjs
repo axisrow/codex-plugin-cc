@@ -68,11 +68,19 @@ const DEFAULT_TURN_TIMEOUT_MS = 600000;
 // progress/delta notification, so a turn that keeps producing events — even
 // slowly, e.g. gpt-5.6-sol at effort=xhigh on a large diff routinely runs
 // well past 10 minutes while still making progress — is never killed by the
-// idle budget alone. This ceiling exists only to catch the case the idle
-// budget can't: a turn that resets its own idle timer forever without ever
-// completing (e.g. a runaway tool-call loop). It is intentionally generous
-// and is not meant to be tuned per-call the way the idle budget is.
-const HARD_WALL_CLOCK_CEILING_MS = 45 * 60 * 1000;
+// idle budget alone.
+//
+// The ceiling therefore serves two different purposes depending on the host:
+//   - background: catch the case the idle budget can't — a turn that resets
+//     its own idle timer forever without ever completing (runaway tool-call
+//     loop). Generous by design; this default applies.
+//   - foreground: also stay below the host's own kill. Claude Code's Bash
+//     tool SIGKILLs node at ~120s, and a foreground turn that outlives that
+//     is killed before captureTurn's catch can send turn/interrupt — leaving
+//     a live, possibly write-capable turn running on the broker with no way
+//     to reach it. The companion passes its 110s foreground budget as the
+//     ceiling so the interrupt always wins the race. See #43.
+const DEFAULT_HARD_WALL_CLOCK_CEILING_MS = 45 * 60 * 1000;
 
 // Resolve the per-turn idle budget at CALL time, not import time. The
 // companion sets CODEX_TURN_TIMEOUT_MS (e.g. the foreground budget, below
@@ -84,7 +92,7 @@ const HARD_WALL_CLOCK_CEILING_MS = 45 * 60 * 1000;
 // every turn/started, item/started, and item/completed notification (see
 // applyTurnNotification -> resetIdleDeadline). A turn that keeps producing
 // events can run indefinitely; only a gap this long with no events at all
-// trips it. A separate, much larger HARD_WALL_CLOCK_CEILING_MS backstops a
+// trips it. A separate wall-clock ceiling (resolveHardCeilingMs) backstops a
 // turn that never stops resetting its own idle timer.
 function resolveTurnTimeoutMs(options = {}) {
   const fromOptions = Number(options.turnTimeoutMs);
@@ -96,6 +104,23 @@ function resolveTurnTimeoutMs(options = {}) {
     return fromEnv;
   }
   return DEFAULT_TURN_TIMEOUT_MS;
+}
+
+// Resolve the hard wall-clock ceiling at call time, mirroring
+// resolveTurnTimeoutMs. Precedence: explicit option (the companion passes
+// 110s for foreground, 45min for background) > CODEX_TURN_HARD_CEILING_MS
+// env override (tests, non-Claude hosts with a different external kill) >
+// the generous default. See DEFAULT_HARD_WALL_CLOCK_CEILING_MS.
+function resolveHardCeilingMs(options = {}) {
+  const fromOptions = Number(options.hardCeilingMs);
+  if (Number.isFinite(fromOptions) && fromOptions > 0) {
+    return fromOptions;
+  }
+  const fromEnv = Number(process.env.CODEX_TURN_HARD_CEILING_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return DEFAULT_HARD_WALL_CLOCK_CEILING_MS;
 }
 
 function cleanCodexStderr(stderr) {
@@ -625,6 +650,14 @@ function applyTurnNotification(state, message) {
     // ever emitting another item/started or item/completed in between. Treat
     // them as activity too, or a genuinely progressing item gets interrupted
     // mid-flight — the exact failure mode this idle timeout exists to avoid.
+    // Every method below carries threadId + turnId, so belongsToTurn can route
+    // it to this turn. Two sibling methods deliberately do NOT appear here:
+    // command/exec/outputDelta and process/outputDelta are connection-scoped
+    // (their params carry only processId / processHandle, no threadId), so
+    // belongsToTurn can never match them and a case for them is dead code.
+    // item/fileChange/outputDelta is kept although upstream deprecated it
+    // ("the server no longer emits this notification") — an older app-server
+    // may still send it, and treating it as activity costs nothing.
     case "item/commandExecution/outputDelta":
     case "item/fileChange/outputDelta":
     case "item/mcpToolCall/progress":
@@ -632,8 +665,6 @@ function applyTurnNotification(state, message) {
     case "item/plan/delta":
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/textDelta":
-    case "command/exec/outputDelta":
-    case "process/outputDelta":
       state.resetIdleDeadline?.();
       break;
     case "error":
@@ -710,12 +741,15 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     state.resetIdleDeadline = armIdleDeadline;
 
     // Coarse wall-clock failsafe: never reset, catches a turn that keeps
-    // resetting its own idle timer forever without ever completing.
+    // resetting its own idle timer forever without ever completing. In the
+    // foreground it also keeps the turn inside the host's own kill window so
+    // the interrupt in the catch below can still run (#43).
+    const hardCeilingMs = resolveHardCeilingMs(options);
     let wallClockTimer = null;
     const wallClockCeiling = new Promise((_resolve, reject) => {
       wallClockTimer = setTimeout(() => {
-        reject(new Error(`codex turn exceeded the ${HARD_WALL_CLOCK_CEILING_MS}ms hard wall-clock ceiling.`));
-      }, HARD_WALL_CLOCK_CEILING_MS);
+        reject(new Error(`codex turn exceeded the ${hardCeilingMs}ms hard wall-clock ceiling.`));
+      }, hardCeilingMs);
       wallClockTimer.unref?.();
     });
 
@@ -1234,6 +1268,7 @@ export async function runAppServerReview(cwd, options = {}) {
       {
         cwd,
         turnTimeoutMs: options.turnTimeoutMs,
+        hardCeilingMs: options.hardCeilingMs,
         onProgress: options.onProgress,
         onResponse(response, state) {
           if (response.reviewThreadId) {
@@ -1376,6 +1411,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       {
         cwd,
         turnTimeoutMs: options.turnTimeoutMs,
+        hardCeilingMs: options.hardCeilingMs,
         onProgress: options.onProgress,
         onResponse() {
           if (!options.effort) {
