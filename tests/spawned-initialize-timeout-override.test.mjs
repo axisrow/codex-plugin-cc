@@ -26,6 +26,23 @@ test("resolveSpawnedInitializeTimeoutMs honours the env override", () => {
   );
 });
 
+// A positive fraction passes a `parsed > 0` check but floors to 0, and request()
+// only installs its timer when timeoutMs > 0 — so a sub-millisecond override
+// would silently disarm the handshake deadline entirely and let a wedged
+// spawned app-server hang forever (the #29/#31 class this deadline exists to
+// prevent). Never resolve to 0.
+test("resolveSpawnedInitializeTimeoutMs never resolves a positive override to 0", () => {
+  for (const rawValue of ["0.5", "0.9", "1e-9", "0.0001"]) {
+    const resolved = resolveSpawnedInitializeTimeoutMs({
+      [SPAWNED_INITIALIZE_TIMEOUT_ENV]: rawValue
+    });
+    assert.ok(resolved > 0, `${rawValue} resolved to ${resolved}, which disarms the deadline`);
+    // Sub-millisecond is unusable input, so it falls back to the default rather
+    // than becoming a 1ms deadline that would fail instantly.
+    assert.equal(resolved, DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS);
+  }
+});
+
 test("resolveSpawnedInitializeTimeoutMs falls back to the default on unusable values", () => {
   for (const rawValue of [undefined, "", "   ", "abc", "-1", "NaN", "Infinity"]) {
     assert.equal(

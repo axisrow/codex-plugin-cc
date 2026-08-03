@@ -48,11 +48,17 @@ export function resolveSpawnedInitializeTimeoutMs(env = process.env) {
     return DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS;
   }
 
-  const parsed = Number(rawValue);
+  // Validate *after* flooring: a positive fraction like 0.5 passes a `parsed > 0`
+  // check but floors to 0, and request() only arms its timer when timeoutMs > 0.
+  // That would silently disarm the handshake deadline and let a wedged spawned
+  // app-server hang forever — the failure mode this deadline exists to prevent
+  // (fork #29/#31). A sub-millisecond budget is unusable input, so fall back to
+  // the default rather than clamping it to an instantly-failing 1ms.
+  const parsed = Math.floor(Number(rawValue));
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS;
   }
-  return Math.floor(parsed);
+  return parsed;
 }
 
 // Bound the broker socket's graceful close the same way the spawned client
