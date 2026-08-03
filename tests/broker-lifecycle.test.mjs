@@ -10,10 +10,13 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir } from "./helpers.mjs";
 import { withBrokerLock } from "../plugins/codex/scripts/lib/broker-lock.mjs";
 import {
+  ensureBrokerSession,
   loadBrokerSession,
   loadReusableBrokerSession,
   sendBrokerShutdown
 } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
+import { isProcessAlive } from "../plugins/codex/scripts/lib/process.mjs";
 import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -158,6 +161,44 @@ test("stale reachable brokers are preserved when the broker reports an active tu
   assert.equal(probeBroker.requests.includes("broker/shutdown"), false);
   assert.equal(fs.existsSync(path.join(stateDir, "broker.json")), true);
   await probeBroker.close();
+});
+
+test("replacing a live broker whose endpoint became unreachable still kills its process", async () => {
+  // Reproduces: broker process is alive and its recorded pid is trustworthy,
+  // but its unix socket file is gone (e.g. swept by external tmp cleanup)
+  // so the readiness probe can't connect within its 150ms budget. That used
+  // to make loadReusableBrokerSessionUnlocked treat the pid as untrustworthy
+  // and skip killProcess entirely, orphaning a live process. It would still
+  // self-exit eventually via its own idle timeout, but stays invisible to
+  // session-lifecycle-hook.mjs (and any other reaper keyed off the state
+  // file) for the whole idle window once the state file is overwritten by
+  // the replacement broker. Use a long idle timeout here so the assertion
+  // below can't pass "by accident" via the broker's own self-shutdown.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS: "600000" };
+
+  const first = await ensureBrokerSession(repo, { env });
+  assert.ok(first, "expected a broker to spawn");
+  assert.equal(isProcessAlive(first.pid), true);
+
+  const target = parseBrokerEndpoint(first.endpoint);
+  fs.unlinkSync(target.path);
+
+  const second = await ensureBrokerSession(repo, { env });
+  assert.ok(second, "expected a replacement broker to spawn");
+  assert.notEqual(second.pid, first.pid);
+
+  const deadline = Date.now() + 2000;
+  while (isProcessAlive(first.pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  assert.equal(isProcessAlive(first.pid), false, "orphaned broker process should have been killed");
+
+  await sendBrokerShutdown(second.endpoint);
 });
 
 test("broker shutdown accepts a response split across socket chunks", async () => {

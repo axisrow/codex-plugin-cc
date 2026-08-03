@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { withBrokerLock } from "./broker-lock.mjs";
 import { probeBroker } from "./broker-probe.mjs";
-import { binaryAvailable, terminateProcessTree } from "./process.mjs";
+import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
@@ -190,11 +190,18 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
   }
 
   if (existing) {
-    // Only trust the recorded pid for tree-kill when the endpoint probe confirmed
-    // the broker was actually live. A stale session whose endpoint is not ready
-    // likely points at a dead broker whose pid the OS may have recycled into an
-    // unrelated process — tree-killing there risks killing the wrong process, so
-    // just drop the files and let any survivor exit on its own.
+    // Only trust the recorded pid for tree-kill when either the endpoint probe
+    // confirmed the broker was actually live, or the pid itself is still alive
+    // right now. A stale session whose endpoint is unreachable AND whose pid is
+    // gone likely points at a dead broker whose pid the OS may have recycled
+    // into an unrelated process — tree-killing there risks killing the wrong
+    // process, so just drop the files and let any survivor exit on its own.
+    // But when the pid is still alive, it's the same process continuously
+    // since the state file recorded it (no recycling window exists), so it's
+    // safe to kill even though its endpoint (e.g. a socket file swept by
+    // external tmp cleanup) is no longer reachable — otherwise it's orphaned
+    // for its full idle-timeout window, invisible to every reaper keyed off
+    // the state file the replacement broker is about to overwrite.
     const existingReady = await isBrokerEndpointReady(existing.endpoint);
     if (existingReady) {
       const brokerStatus = await probeBroker(existing.endpoint, cwd);
@@ -210,9 +217,8 @@ async function loadReusableBrokerSessionUnlocked(cwd, options = {}) {
         return null;
       }
     }
-    const killProcess = existingReady
-      ? (options.killProcess ?? terminateProcessTree)
-      : (options.killProcess ?? null);
+    const trustedPid = existingReady || isProcessAlive(existing.pid);
+    const killProcess = trustedPid ? (options.killProcess ?? terminateProcessTree) : (options.killProcess ?? null);
     teardownExistingBroker(cwd, existing, killProcess);
   }
 
