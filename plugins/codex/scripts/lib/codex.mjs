@@ -1206,7 +1206,12 @@ function resolveInterruptTimeoutMs(timeoutMs) {
   return DEFAULT_INTERRUPT_TIMEOUT_MS;
 }
 
-export async function interruptAppServerTurn(cwd, { threadId, turnId, timeoutMs } = {}) {
+/**
+ * @param {string} cwd
+ * @param {{ threadId?: string, turnId?: string, timeoutMs?: number }} [options]
+ */
+export async function interruptAppServerTurn(cwd, options = {}) {
+  const { threadId, turnId, timeoutMs } = options;
   if (!threadId || !turnId) {
     return {
       attempted: false,
