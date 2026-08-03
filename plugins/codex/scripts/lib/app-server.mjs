@@ -31,7 +31,29 @@ export const BROKER_BUSY_RPC_CODE = -32001;
 export const REQUEST_TIMEOUT_CODE = "EBROKERTIMEOUT";
 const BROKER_CONNECT_TIMEOUT_MS = 2000;
 const BROKER_INITIALIZE_TIMEOUT_MS = 5000;
-const SPAWNED_INITIALIZE_TIMEOUT_MS = 10000;
+
+// Escape hatch for the spawned handshake deadline (fork #55). A cold start, a
+// container with a tight CPU quota, or a loaded CI runner can genuinely need
+// more than 10s, and until now nothing in production set the
+// `spawnedInitializeTimeoutMs` option — the only caller was a test, so the
+// failure was untunable. Mirrors CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS in
+// app-server-broker.mjs: same env-name shape, same lenient parse, same
+// fall-back-to-default-on-garbage behaviour.
+export const SPAWNED_INITIALIZE_TIMEOUT_ENV = "CODEX_COMPANION_SPAWNED_INITIALIZE_TIMEOUT_MS";
+export const DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS = 10000;
+
+export function resolveSpawnedInitializeTimeoutMs(env = process.env) {
+  const rawValue = env?.[SPAWNED_INITIALIZE_TIMEOUT_ENV];
+  if (rawValue == null || rawValue === "") {
+    return DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS;
+  }
+  return Math.floor(parsed);
+}
 
 // Bound the broker socket's graceful close the same way the spawned client
 // already bounds its own (close()'s 50ms killChildNow() fallback below).
@@ -106,7 +128,7 @@ class AppServerClientBase {
    * @template {AppServerMethod} M
    * @param {M} method
    * @param {import("./app-server-protocol").AppServerRequestParams<M>} params
-   * @param {{ timeoutMs?: number, onTimeout?: () => void }} [options]
+   * @param {{ timeoutMs?: number, onTimeout?: () => void, timeoutMessage?: string }} [options]
    * @returns {Promise<import("./app-server-protocol").AppServerResponse<M>>}
    */
   request(method, params, options = {}) {
@@ -116,7 +138,7 @@ class AppServerClientBase {
 
     const id = this.nextId;
     this.nextId += 1;
-    const { timeoutMs, onTimeout } = options;
+    const { timeoutMs, onTimeout, timeoutMessage } = options;
 
     return new Promise((resolve, reject) => {
       let timer = null;
@@ -130,7 +152,9 @@ class AppServerClientBase {
             try {
               onTimeout?.();
             } catch {}
-            const error = /** @type {ProtocolError} */ (new Error(`codex app-server ${method} timed out.`));
+            const error = /** @type {ProtocolError} */ (new Error(
+              timeoutMessage ?? `codex app-server ${method} timed out.`
+            ));
             error.code = REQUEST_TIMEOUT_CODE;
             reject(error);
           }
@@ -272,12 +296,22 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleLine(line);
     });
 
+    const initializeTimeoutMs =
+      this.options.spawnedInitializeTimeoutMs ??
+      resolveSpawnedInitializeTimeoutMs(this.options.env ?? process.env);
+
     try {
       await this.request("initialize", {
         clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
         capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
       }, {
-        timeoutMs: this.options.spawnedInitializeTimeoutMs ?? SPAWNED_INITIALIZE_TIMEOUT_MS
+        timeoutMs: initializeTimeoutMs,
+        // Name both the deadline that fired and the knob that raises it — the
+        // bare "initialize timed out." told the user nothing actionable (#55).
+        timeoutMessage:
+          `codex app-server initialize timed out after ${initializeTimeoutMs}ms. ` +
+          `If this machine is slow or heavily loaded, raise the deadline with ` +
+          `${SPAWNED_INITIALIZE_TIMEOUT_ENV}=<milliseconds>.`
       });
     } catch (error) {
       // A handshake failure (timeout, app-server crash) must not orphan the
