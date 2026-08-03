@@ -290,3 +290,71 @@ export async function spawnBusyBroker() {
     }
   };
 }
+
+/**
+ * A real net.createServer that completes the handshake and answers every
+ * subsequent request normally, but never reciprocates a TCP half-close: on
+ * receiving FIN (the client's socket.end()) it does not also end/destroy its
+ * side. Reproduces the #47/PR-48 Codex-review finding that
+ * BrokerCodexAppServerClient.close() called socket.end() and awaited
+ * exitPromise with no fallback -- a peer that stays alive and ignores the FIN
+ * left close() (and any onTimeout handler that calls it) hanging forever.
+ */
+export async function spawnStubbornBroker() {
+  const sessionDir = makeTempDir("broker-stubborn-");
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const connections = new Set();
+  // allowHalfOpen: true is load-bearing. Node's default (false) auto-ends
+  // the accepted socket's write side as soon as it sees the client's FIN --
+  // which would make this fixture indistinguishable from a normal close and
+  // silently defeat the regression test. true keeps the connection genuinely
+  // half-open so the fixture can deliberately never reciprocate.
+  const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+    socket.setEncoding("utf8");
+    connections.add(socket);
+    socket.on("error", () => {});
+    // Deliberately do NOT end/destroy on "end" (FIN received) -- that is the
+    // wedge this fixture reproduces. Track close purely for cleanup.
+    socket.on("close", () => connections.delete(socket));
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        newlineIndex = buffer.indexOf("\n");
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === undefined) {
+          continue;
+        }
+        if (message.method === "initialize") {
+          socket.write(`${JSON.stringify({ id: message.id, result: { userAgent: "stubborn-broker" } })}\n`);
+        } else {
+          socket.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  return {
+    socketPath,
+    cleanup() {
+      for (const socket of connections) {
+        socket.destroy();
+      }
+      connections.clear();
+      try {
+        server.close();
+      } catch {}
+      try {
+        fs.unlinkSync(socketPath);
+      } catch {}
+    }
+  };
+}

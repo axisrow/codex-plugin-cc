@@ -3357,6 +3357,39 @@ test("a foreground turn's wall-clock ceiling stays below the host's Bash SIGKILL
   assert.ok(fixtureState.lastInterrupt, "foreground timeout must still interrupt the turn");
 });
 
+test("turn/interrupt itself is bounded: a broker that accepts it but never answers does not hang the companion (#47)", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "silent-turn-interrupt");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // Same continuously-progressing fixture as the wall-clock-ceiling tests, but
+  // the fixture's turn/interrupt handler accepts the request and never
+  // responds. Before the #47 fix, client.request("turn/interrupt", ...) had
+  // no timeoutMs, so captureTurn's catch would block on it indefinitely --
+  // bounded in practice only by the host's own SIGKILL. Assert the process
+  // still exits promptly: ceiling (2500ms) + interrupt timeout (5000ms) with
+  // generous headroom, well under the fixture's ~20s full run and far below
+  // a host kill.
+  const start = Date.now();
+  const result = run("node", [SCRIPT, "task", "--turn-timeout-ms", "2000", "test prompt"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CODEX_TURN_HARD_CEILING_MS: "2500" }
+  });
+  const elapsedMs = Date.now() - start;
+
+  assert.notEqual(result.status, 0, "must fail via the wall-clock ceiling, not complete");
+  assert.ok(
+    elapsedMs < 15000,
+    `must exit within ceiling + interrupt timeout, not hang on the unanswered turn/interrupt (took ${elapsedMs}ms)`
+  );
+  const fixtureState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.ok(fixtureState.lastInterrupt, "turn/interrupt must still have been attempted");
+});
+
 test("a long reasoning stretch keeps the turn alive: reasoning deltas are not opted out at handshake", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

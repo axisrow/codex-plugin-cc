@@ -828,12 +828,14 @@ rl.on("line", (line) => {
 	            setTimeout(tick, gapMs);
 	          };
 	          setTimeout(tick, gapMs);
-	        } else if (BEHAVIOR === "long-progress-hits-wall-clock-ceiling") {
+	        } else if (BEHAVIOR === "long-progress-hits-wall-clock-ceiling" || BEHAVIOR === "silent-turn-interrupt") {
 	          // Continuously-progressing turn: one item/started, then a
 	          // commandExecution outputDelta every 500ms for ~20s. Every delta
 	          // resets the idle deadline, so the idle budget alone never fires --
 	          // only the separate hard wall-clock ceiling can stop this turn.
-	          // Registered as interruptible so turn/interrupt is observable.
+	          // Registered as interruptible so turn/interrupt is observable. When
+	          // BEHAVIOR is "silent-turn-interrupt" the turn/interrupt handler
+	          // above never responds, exercising #47's turn/interrupt timeout.
 	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
 	          send({
 	            method: "item/started",
@@ -930,6 +932,12 @@ rl.on("line", (line) => {
 	          turnId: message.params.turnId
 	        };
 	        saveState(state);
+	        // #47 finding 2 fixture: accept the connection and the request, but
+	        // never respond, so callers verify turn/interrupt is bounded by its
+	        // own timeout instead of hanging until the process is killed.
+	        if (BEHAVIOR === "silent-turn-interrupt") {
+	          break;
+	        }
 	        const pending = interruptibleTurns.get(message.params.turnId);
 	        if (pending) {
 	          clearTimeout(pending.timer);
