@@ -623,6 +623,113 @@ test("task --resume-last resumes the latest persisted task thread", () => {
   assert.equal(fakeState.lastThreadResume.sandbox, null);
 });
 
+test("task --resume-last is not permanently blocked by a job stuck 'running' with a dead worker pid (upstream #392)", () => {
+  // resolveLatestTrackedTaskThread() reads jobs via listJobs(), which already
+  // reconciles a "running" job with a dead pid to "failed" (state.mjs's
+  // reconcileRunningJobs, exercised directly by "status and resume candidates
+  // mark a running job with a dead pid as failed" above). This test proves
+  // that reconciliation actually unblocks the --resume-last gate itself, not
+  // just /status and task-resume-candidate — the exact throw upstream #392
+  // reports ("Task <id> is still running. Use /codex:status before continuing
+  // it.") never fires for a worker that has actually exited.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-dead-worker" };
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const stateFile = path.join(stateDir, "state.json");
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const job = state.jobs.find((entry) => entry.jobClass === "task");
+  assert.ok(job, "expected the completed task job to be recorded");
+
+  const exitedWorker = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const deadPid = exitedWorker.pid;
+  const exitedForReal = new Promise((resolve, reject) => {
+    exitedWorker.once("error", reject);
+    exitedWorker.once("exit", resolve);
+  });
+
+  // Simulate the worker crashing mid-run: still "running", pid now dead, no
+  // completedAt/result was ever written (the exact state a SIGKILL or an
+  // uncaught exception leaves behind, since neither reaches runTrackedJob's
+  // catch or a normal completion write).
+  const stuckJob = { ...job, status: "running", phase: "running", pid: deadPid };
+  const jobFile = path.join(stateDir, "jobs", `${job.id}.json`);
+  writeJobFile(repo, job.id, { ...JSON.parse(fs.readFileSync(jobFile, "utf8")), status: "running", phase: "running", pid: deadPid });
+  fs.writeFileSync(stateFile, `${JSON.stringify({ ...state, jobs: [stuckJob] }, null, 2)}\n`, "utf8");
+
+  return exitedForReal.then(() => {
+    const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+
+    assert.equal(resume.status, 0, resume.stderr);
+    assert.doesNotMatch(resume.stderr, /is still running/i);
+    assert.equal(resume.stdout, "Resumed the prior run.\nFollow-up prompt accepted.\n");
+    const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(fakeState.lastThreadResume.sandbox, null);
+  });
+});
+
+test("task --resume-last is not permanently blocked by a job stuck 'queued' with a dead worker pid (upstream #425 gap)", () => {
+  // reconcileRunningJobs (state.mjs) used to only reconcile job.status ===
+  // "running". A detached worker that dies BEFORE runTrackedJob's first
+  // write — the window between enqueueBackgroundTask recording
+  // status:"queued" with the spawned child's pid, and that worker calling
+  // runTrackedJob to flip it to "running" — was never reconciled: it stayed
+  // "queued" forever, with a pid that's already dead, invisible to the
+  // reconciliation check and permanently blocking --resume-last. This is the
+  // detached-worker-dies-early half of what upstream #425's reapDeadJobs
+  // (which reaps any queued/running job with a dead pid, not just running)
+  // covers and #392's throw-site fix does not. Fixed by also reconciling
+  // "queued" jobs, not just "running" ones.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-dead-queued-worker" };
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const stateFile = path.join(stateDir, "state.json");
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const job = state.jobs.find((entry) => entry.jobClass === "task");
+  assert.ok(job, "expected the completed task job to be recorded");
+
+  const exitedWorker = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const deadPid = exitedWorker.pid;
+  const exitedForReal = new Promise((resolve, reject) => {
+    exitedWorker.once("error", reject);
+    exitedWorker.once("exit", resolve);
+  });
+
+  const stuckJob = { ...job, status: "queued", phase: "queued", pid: deadPid };
+  const jobFile = path.join(stateDir, "jobs", `${job.id}.json`);
+  writeJobFile(repo, job.id, { ...JSON.parse(fs.readFileSync(jobFile, "utf8")), status: "queued", phase: "queued", pid: deadPid });
+  fs.writeFileSync(stateFile, `${JSON.stringify({ ...state, jobs: [stuckJob] }, null, 2)}\n`, "utf8");
+
+  return exitedForReal.then(() => {
+    const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+
+    assert.equal(resume.status, 0, resume.stderr);
+    assert.doesNotMatch(resume.stderr, /is still running/i);
+  });
+});
+
 test("task-resume-candidate uses an explicit workspace cwd from an unrelated invocation directory", () => {
   const workspace = makeTempDir();
   const invocationDir = makeTempDir();

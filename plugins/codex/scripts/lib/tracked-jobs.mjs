@@ -252,3 +252,55 @@ export async function runTrackedJob(job, runner, options = {}) {
     throw error;
   }
 }
+
+function markWorkerJobDead(workspaceRoot, jobId, logFile, errorMessage) {
+  const stored = readStoredJobOrNull(workspaceRoot, jobId);
+  if (stored && stored.status !== "running" && stored.status !== "queued") {
+    // Already terminal (e.g. /codex:cancel wrote "cancelled" and delivered the
+    // SIGTERM this guard is reacting to) — don't race that state back to failed.
+    return;
+  }
+  const base = stored ?? { id: jobId, status: "running", logFile };
+  const completedAt = nowIso();
+  writeJobFile(workspaceRoot, jobId, {
+    ...base,
+    status: "failed",
+    phase: "failed",
+    errorMessage,
+    pid: null,
+    completedAt
+  });
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage,
+    completedAt
+  });
+  appendLogLine(logFile ?? base.logFile ?? null, `Marked failed: ${errorMessage}`);
+}
+
+// Guards only against in-process crashes (uncaughtException / unhandledRejection)
+// where a precise error is available and no other command is writing the job.
+// Signal-based deaths (SIGTERM/SIGINT/SIGHUP/SIGKILL) are intentionally NOT
+// caught here: SIGKILL is uncatchable, so a reader-side liveness check (see
+// state.mjs's reconcileRunningJobs, which now also covers "queued") must cover
+// process death regardless, and /codex:cancel delivers SIGTERM as its teardown
+// signal after already writing the job "cancelled" — catching it here would
+// race that terminal state back to "failed". markWorkerJobDead never rewrites
+// a job that already reached a terminal status, so a same-tick cancel wins.
+export function registerWorkerCrashGuard(workspaceRoot, jobId, logFile = null) {
+  const mark = (label) => (reason) => {
+    try {
+      const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason ?? "");
+      appendLogLine(logFile, `Worker ${label}: ${detail}`);
+      markWorkerJobDead(workspaceRoot, jobId, logFile, `worker ${label}: ${detail.split("\n")[0]}`);
+    } catch {
+      // Never let the guard itself throw during teardown.
+    }
+    process.exit(1);
+  };
+  process.on("uncaughtException", mark("uncaughtException"));
+  process.on("unhandledRejection", mark("unhandledRejection"));
+}
