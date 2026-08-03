@@ -41,6 +41,10 @@ const BROKER_INITIALIZE_TIMEOUT_MS = 5000;
 // fall-back-to-default-on-garbage behaviour.
 export const SPAWNED_INITIALIZE_TIMEOUT_ENV = "CODEX_COMPANION_SPAWNED_INITIALIZE_TIMEOUT_MS";
 export const DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS = 10000;
+// Node stores a timer's delay in a 32-bit signed int; anything larger is
+// silently reduced to 1ms with a TimeoutOverflowWarning. Values above this are
+// unusable input, not a bigger budget.
+export const MAX_SPAWNED_INITIALIZE_TIMEOUT_MS = 2147483647;
 
 export function resolveSpawnedInitializeTimeoutMs(env = process.env) {
   const rawValue = env?.[SPAWNED_INITIALIZE_TIMEOUT_ENV];
@@ -52,10 +56,13 @@ export function resolveSpawnedInitializeTimeoutMs(env = process.env) {
   // check but floors to 0, and request() only arms its timer when timeoutMs > 0.
   // That would silently disarm the handshake deadline and let a wedged spawned
   // app-server hang forever — the failure mode this deadline exists to prevent
-  // (fork #29/#31). A sub-millisecond budget is unusable input, so fall back to
-  // the default rather than clamping it to an instantly-failing 1ms.
+  // (fork #29/#31). At the other end, a value above MAX_* is reduced by
+  // setTimeout to 1ms, so asking for a huge budget would fail almost instantly.
+  // Both extremes are unusable input: fall back to the default rather than
+  // clamping, so the user sees the documented 10s behaviour instead of a
+  // deadline that silently means the opposite of what they typed.
   const parsed = Math.floor(Number(rawValue));
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > MAX_SPAWNED_INITIALIZE_TIMEOUT_MS) {
     return DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS;
   }
   return parsed;

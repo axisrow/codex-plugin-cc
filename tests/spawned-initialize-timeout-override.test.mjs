@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   SPAWNED_INITIALIZE_TIMEOUT_ENV,
   DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS,
+  MAX_SPAWNED_INITIALIZE_TIMEOUT_MS,
   resolveSpawnedInitializeTimeoutMs
 } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
@@ -41,6 +42,32 @@ test("resolveSpawnedInitializeTimeoutMs never resolves a positive override to 0"
     // than becoming a 1ms deadline that would fail instantly.
     assert.equal(resolved, DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS);
   }
+});
+
+// The mirror image of the sub-millisecond case: Node's setTimeout stores its
+// delay in a 32-bit signed int, so any value above 2^31-1 is silently reduced
+// to 1ms (with a TimeoutOverflowWarning). A user raising the deadline to
+// something enormous would get a near-instant handshake failure — the opposite
+// of what they asked for. Never resolve above the timer ceiling.
+test("resolveSpawnedInitializeTimeoutMs rejects values above Node's timer ceiling", () => {
+  for (const rawValue of ["2147483648", "2147483648.7", "9999999999", "1e21"]) {
+    const resolved = resolveSpawnedInitializeTimeoutMs({
+      [SPAWNED_INITIALIZE_TIMEOUT_ENV]: rawValue
+    });
+    assert.ok(
+      resolved <= MAX_SPAWNED_INITIALIZE_TIMEOUT_MS,
+      `${rawValue} resolved to ${resolved}, which setTimeout would reduce to 1ms`
+    );
+    assert.equal(resolved, DEFAULT_SPAWNED_INITIALIZE_TIMEOUT_MS);
+  }
+
+  // The ceiling itself is still a usable value.
+  assert.equal(
+    resolveSpawnedInitializeTimeoutMs({
+      [SPAWNED_INITIALIZE_TIMEOUT_ENV]: String(MAX_SPAWNED_INITIALIZE_TIMEOUT_MS)
+    }),
+    MAX_SPAWNED_INITIALIZE_TIMEOUT_MS
+  );
 });
 
 test("resolveSpawnedInitializeTimeoutMs falls back to the default on unusable values", () => {
