@@ -35,6 +35,8 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  CANCELLATION_INTERRUPT_REQUIRED_MESSAGE,
+  isOrphanedTurn,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -1134,6 +1136,44 @@ async function handleCancel(argv) {
     });
     return cancelledJob;
   };
+
+  const isOrphan = isOrphanedTurn(job);
+
+  // An orphaned job has no local pid to fall back on — the remote interrupt is
+  // the ONLY mechanism that can actually stop it, so cancellation must not be
+  // persisted until that interrupt is confirmed. Do this BEFORE the optimistic
+  // persistCancellation() below: interruptAppServerTurn is bounded (see
+  // DEFAULT_INTERRUPT_TIMEOUT_MS), but persisting "cancelled" first and rolling
+  // back only after the await returns leaves a false-cancelled state on disk if
+  // the process is killed or crashes while still awaiting it.
+  if (isOrphan) {
+    const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
+    if (interrupt.attempted) {
+      appendLogLine(
+        job.logFile,
+        interrupt.interrupted
+          ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
+          : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
+      );
+    }
+    if (!interrupt.interrupted) {
+      const detail = interrupt.detail ? `: ${interrupt.detail}` : ".";
+      const message = `${CANCELLATION_INTERRUPT_REQUIRED_MESSAGE}${detail}`;
+      appendLogLine(job.logFile, message);
+      throw new Error(message);
+    }
+    const nextJob = persistCancellation(null);
+    appendLogLine(job.logFile, "Cancelled by user.");
+    const payload = {
+      jobId: job.id,
+      status: "cancelled",
+      title: job.title,
+      turnInterruptAttempted: interrupt.attempted,
+      turnInterrupted: interrupt.interrupted
+    };
+    outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+    return;
+  }
 
   persistCancellation(job.pid ?? null);
   appendLogLine(job.logFile, "Cancelled by user.");

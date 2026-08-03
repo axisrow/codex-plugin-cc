@@ -2,7 +2,15 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { isProcessAlive } from "./process.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  getConfig,
+  listJobs,
+  readJobFile,
+  resolveJobFile,
+  UNREPORTED_PROCESS_EXIT_MESSAGE,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -10,6 +18,8 @@ export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
 export const CANCELLATION_TERMINATION_FAILED_MESSAGE =
   "Cancellation requested but process termination failed; retry /codex:cancel.";
+export const CANCELLATION_INTERRUPT_REQUIRED_MESSAGE =
+  "Cancellation requested but the remote Codex turn interrupt failed; retry /codex:cancel.";
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -323,10 +333,21 @@ export function resolveResultJob(cwd, reference) {
   throw new Error("No finished Codex jobs found for this repository yet.");
 }
 
+export function isOrphanedTurn(job) {
+  return (
+    job.status === "failed" &&
+    job.errorMessage === UNREPORTED_PROCESS_EXIT_MESSAGE &&
+    Boolean(job.threadId) &&
+    Boolean(job.turnId)
+  );
+}
+
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter(
+    (job) => job.status === "queued" || job.status === "running" || isOrphanedTurn(job)
+  );
 
   if (reference) {
     const selected = matchJobReference(activeJobs, reference);

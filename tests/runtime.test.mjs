@@ -2262,6 +2262,179 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
   assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
 });
 
+function writeOrphanedJobFixture(workspace, { threadId = "thr_orphaned", turnId = "turn_orphaned" } = {}) {
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const logFile = path.join(jobsDir, "task-orphaned.log");
+  const jobFile = path.join(jobsDir, "task-orphaned.json");
+  fs.writeFileSync(logFile, "[2026-03-18T15:30:00.000Z] Starting Codex Task.\n", "utf8");
+  fs.writeFileSync(
+    jobFile,
+    JSON.stringify(
+      {
+        id: "task-orphaned",
+        status: "running",
+        title: "Codex Task",
+        threadId,
+        turnId,
+        logFile
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-orphaned",
+            status: "running",
+            title: "Codex Task",
+            jobClass: "task",
+            summary: "Investigate flaky test",
+            threadId,
+            turnId,
+            // A pid that is guaranteed to be dead simulates the SIGKILLed foreground process.
+            pid: 999999,
+            logFile,
+            createdAt: "2026-03-18T15:30:00.000Z",
+            startedAt: "2026-03-18T15:30:01.000Z",
+            updatedAt: "2026-03-18T15:30:02.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  return { stateDir, jobsDir, logFile, jobFile };
+}
+
+test("cancel reaches a job orphaned by a SIGKILLed companion process once the remote turn interrupt succeeds (closes #42)", () => {
+  const workspace = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  // buildEnv() pins process.env.CLAUDE_PLUGIN_DATA for this worker (see its doc
+  // comment) — resolve it before writeOrphanedJobFixture computes resolveStateDir,
+  // so the in-process read and the spawned companion's state dir agree.
+  const env = buildEnv(binDir);
+  const { stateDir, logFile, jobFile } = writeOrphanedJobFixture(workspace);
+
+  // Reconciliation (triggered by /codex:status) flips the dead-pid job to "failed"
+  // before cancel ever runs, mirroring the real orphan sequence from the issue.
+  const statusResult = run("node", [SCRIPT, "status", "--json"], { cwd: workspace, env });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const reconciled = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.id === "task-orphaned"
+  );
+  assert.equal(reconciled.status, "failed");
+  assert.equal(reconciled.errorMessage, "Process exited without reporting.");
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace,
+    env
+  });
+
+  assert.equal(cancelResult.status, 0, cancelResult.stderr);
+  const payload = JSON.parse(cancelResult.stdout);
+  assert.equal(payload.status, "cancelled");
+  assert.equal(payload.turnInterrupted, true);
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const cancelled = state.jobs.find((job) => job.id === "task-orphaned");
+  assert.equal(cancelled.status, "cancelled");
+
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "cancelled");
+  assert.match(fs.readFileSync(logFile, "utf8"), /Cancelled by user/);
+});
+
+test("cancel does not finalize an orphaned job as cancelled when the remote turn interrupt fails, and stays retryable", () => {
+  const workspace = makeTempDir();
+  const { stateDir, logFile, jobFile } = writeOrphanedJobFixture(workspace);
+
+  // No fake codex on PATH: interruptAppServerTurn cannot reach a real broker/thread,
+  // so the interrupt attempt fails (or is never attempted) — this must NOT be
+  // treated as a successful cancellation, since nothing actually stopped the
+  // orphaned remote turn.
+  const statusResult = run("node", [SCRIPT, "status", "--json"], { cwd: workspace });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const reconciled = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.id === "task-orphaned"
+  );
+  assert.equal(reconciled.status, "failed");
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace
+  });
+
+  assert.notEqual(cancelResult.status, 0);
+  assert.match(cancelResult.stderr, /remote Codex turn interrupt failed/i);
+
+  // The job must remain in its original orphaned-failed state so a retried
+  // /codex:cancel can still select and re-attempt it via isOrphanedTurn.
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const stillOrphaned = state.jobs.find((job) => job.id === "task-orphaned");
+  assert.equal(stillOrphaned.status, "failed");
+  assert.equal(stillOrphaned.errorMessage, "Process exited without reporting.");
+  assert.equal(stillOrphaned.pid, null);
+
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.errorMessage, "Process exited without reporting.");
+
+  const retryResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace
+  });
+  assert.notEqual(retryResult.status, 0);
+  assert.match(retryResult.stderr, /remote Codex turn interrupt failed/i);
+});
+
+test("cancel on an orphaned job does not persist cancelled while the remote interrupt is still hung, and stays retryable once it times out", () => {
+  const workspace = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-interrupt");
+  const env = buildEnv(binDir);
+  const { stateDir, logFile, jobFile } = writeOrphanedJobFixture(workspace);
+
+  const statusResult = run("node", [SCRIPT, "status", "--json"], { cwd: workspace, env });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  const reconciled = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.id === "task-orphaned"
+  );
+  assert.equal(reconciled.status, "failed");
+
+  // The fake broker never answers turn/interrupt. Without a bounded timeout on
+  // that request, /codex:cancel would hang here; with one, it must return
+  // (non-zero) once the timeout fires rather than persisting "cancelled" before
+  // the interrupt is confirmed.
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-orphaned", "--json"], {
+    cwd: workspace,
+    env
+  });
+
+  assert.notEqual(cancelResult.status, 0);
+  assert.match(cancelResult.stderr, /remote Codex turn interrupt failed/i);
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const stillOrphaned = state.jobs.find((job) => job.id === "task-orphaned");
+  assert.equal(stillOrphaned.status, "failed");
+  assert.equal(stillOrphaned.errorMessage, "Process exited without reporting.");
+
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "failed");
+  assert.match(fs.readFileSync(logFile, "utf8"), /remote Codex turn interrupt failed/i);
+});
+
 test("failed cancellation restores a live job so cancellation can be retried", () => {
   const workspace = makeTempDir();
   const job = {
