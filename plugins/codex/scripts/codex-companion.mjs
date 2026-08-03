@@ -50,6 +50,7 @@ import {
   createJobRecord,
   createProgressReporter,
   nowIso,
+  registerWorkerCrashGuard,
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
@@ -1004,6 +1005,7 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
+  registerWorkerCrashGuard(workspaceRoot, options["job-id"], logFile);
   await runTrackedJob(
     {
       ...storedJob,

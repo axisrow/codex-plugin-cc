@@ -152,7 +152,19 @@ function reconcileRunningJobs(cwd, state) {
   const completedAt = nowIso();
   const staleJobs = [];
   const jobs = state.jobs.map((job) => {
-    if (job.status !== "running" || !Number.isInteger(job.pid) || job.pid <= 0 || isProcessAlive(job.pid)) {
+    // "queued" also needs reconciling: enqueueBackgroundTask records the
+    // detached worker's pid at enqueue time, before that worker has run far
+    // enough to flip the record to "running" via runTrackedJob. A worker that
+    // dies in that window (crash, immediate OOM kill) leaves the job stuck
+    // "queued" forever with an already-dead pid — invisible to this check if
+    // it only looked at "running" — permanently blocking --resume-last and
+    // any other gate that treats queued/running as active.
+    if (
+      (job.status !== "running" && job.status !== "queued") ||
+      !Number.isInteger(job.pid) ||
+      job.pid <= 0 ||
+      isProcessAlive(job.pid)
+    ) {
       return job;
     }
 
