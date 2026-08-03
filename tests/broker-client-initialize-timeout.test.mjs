@@ -4,8 +4,30 @@ import assert from "node:assert/strict";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { withAppServer } from "../plugins/codex/scripts/lib/codex.mjs";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { makeTempDir } from "./helpers.mjs";
+import { makeTempDir, scaleTimeout } from "./helpers.mjs";
 import { spawnBusyBroker, spawnWedgedServer } from "./broker-controller-helpers.mjs";
+
+/**
+ * Race `promise` against a watchdog that resolves to `hangValue`.
+ *
+ * The watchdog timer is cleared once the race settles. A bare
+ * `setTimeout` in a Promise.race keeps the event loop alive for the full
+ * budget even when the real promise won, which held the test process open
+ * long after the assertions passed.
+ */
+async function raceHang(promise, hangValue, budgetMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(hangValue), scaleTimeout(budgetMs));
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Reproduces fork #29 / upstream openai#509: when the shared broker is wedged
 // (busy with a long-running request and never reaching the second socket), the
@@ -17,6 +39,10 @@ test("client does not hang on initialize when broker is wedged (#29/#509)", asyn
   // Short handshake budgets so the test does not wait on the production
   // defaults (2s connect / 5s initialize). The wedged broker connects but
   // never answers initialize, so the initialize deadline must fire.
+  //
+  // These two stay unscaled on purpose: they are the deadlines under test, and
+  // the assertion below is that the client honors them. Only the HANG watchdog
+  // racing them is scaled, since that one budgets real connect work.
   const connectP = CodexAppServerClient.connect(cwd, {
     brokerEndpoint: `unix:${wedged.socketPath}`,
     brokerConnectTimeoutMs: 300,
@@ -25,14 +51,14 @@ test("client does not hang on initialize when broker is wedged (#29/#509)", asyn
 
   let outcome = "HANG";
   try {
-    const winner = await Promise.race([
+    outcome = await raceHang(
       connectP.then(
         () => "connected",
         (error) => ({ errored: error.code ?? error.rpcCode ?? error.message })
       ),
-      new Promise((resolve) => setTimeout(() => resolve("HANG"), 2000))
-    ]);
-    outcome = winner;
+      "HANG",
+      2000
+    );
   } finally {
     wedged.cleanup();
   }
@@ -58,7 +84,7 @@ test("withAppServer falls back to a direct app-server when the broker wedges (#2
 
   let calls = 0;
   try {
-    const result = await Promise.race([
+    const result = await raceHang(
       withAppServer(
         cwd,
         async (client) => {
@@ -72,8 +98,9 @@ test("withAppServer falls back to a direct app-server when the broker wedges (#2
           env
         }
       ),
-      new Promise((resolve) => setTimeout(() => resolve({ HANG: true }), 5000))
-    ]);
+      { HANG: true },
+      5000
+    );
 
     assert.ok(!result.HANG, "withAppServer hung instead of falling back to direct");
     assert.equal(calls, 1, "the operation must run exactly once via the direct fallback");
@@ -97,7 +124,7 @@ test("withAppServer falls back to a direct app-server on broker/busy after a suc
 
   let calls = 0;
   try {
-    const result = await Promise.race([
+    const result = await raceHang(
       withAppServer(
         cwd,
         async (client) => {
@@ -113,8 +140,9 @@ test("withAppServer falls back to a direct app-server on broker/busy after a suc
           env
         }
       ),
-      new Promise((resolve) => setTimeout(() => resolve({ HANG: true }), 5000))
-    ]);
+      { HANG: true },
+      5000
+    );
 
     assert.ok(!result.HANG, "withAppServer hung instead of falling back to direct on broker/busy");
     // The broker attempt hits -32001, withAppServer retries on direct — so fn

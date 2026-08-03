@@ -7,7 +7,7 @@ import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
-import { makeTempDir } from "./helpers.mjs";
+import { makeTempDir, scaleTimeout } from "./helpers.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BROKER_SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "app-server-broker.mjs");
@@ -29,9 +29,12 @@ function forkBroker({ argv, env, cwd }) {
   });
 }
 
+// The budget covers a real broker fork plus a real fake-codex app-server spawn,
+// so it is scaled: on a loaded box those spawns are what blow past a flat 5s.
 function onceMessage(child, type, timeoutMs = 5000) {
+  const budgetMs = scaleTimeout(timeoutMs);
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timed out waiting for IPC ${type}.`)), timeoutMs);
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for IPC ${type} after ${budgetMs}ms.`)), budgetMs);
     const onMessage = (msg) => {
       if (msg?.type === type) {
         clearTimeout(timer);

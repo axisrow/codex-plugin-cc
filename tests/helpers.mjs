@@ -27,6 +27,58 @@ export function makeTempDir(prefix = "codex-plugin-test-") {
 // ephemeral value for spawned subprocesses; this covers in-process reads.
 delete process.env.CLAUDE_PLUGIN_DATA;
 
+// Timeouts guarding *real* work (spawning brokers and app-servers) are races
+// against the machine, not assertions about logic. Under CPU contention — several
+// `npm test` runs at once, or a busy CI box — a hard 5s budget loses to work that
+// takes ~0.5s when idle, and unrelated tests fail at almost exactly the deadline
+// (fork #53). Scale those budgets so the tests keep asserting behavior instead of
+// asserting machine speed.
+//
+// Deliberately NOT derived from os.loadavg(): that is a 1-minute average, so it
+// still reads near-idle during the first seconds of a burst — exactly when these
+// deadlines are computed. Measured on a 10-core box, ten concurrent test
+// processes produced a load-derived multiplier of 1 while the work needed ~4x,
+// and the suite failed at a flat 5000ms. The base multiplier below is therefore
+// unconditional: a too-generous budget costs nothing on a green run (the wait
+// resolves the moment the event arrives), while a too-tight one costs a false
+// failure. CODEX_TEST_TIMEOUT_SCALE overrides it — set it to 1 when debugging a
+// genuine hang and you want the short deadline back.
+const TIMEOUT_SCALE = resolveTimeoutScale();
+
+function resolveTimeoutScale() {
+  const override = Number(process.env.CODEX_TEST_TIMEOUT_SCALE);
+  if (Number.isFinite(override) && override > 0) return override;
+
+  // Absorbs the common case: a developer running the suite next to an editor,
+  // a build, or a second `npm test`. Chosen so the observed worst case under
+  // 10-way contention (~4x the idle spawn time) still fits.
+  const BASE = 6;
+
+  // loadavg lags a burst, but when it *has* caught up — a CI box already busy
+  // when the suite starts, or a long-running run — it is a true signal, so take
+  // it as a floor on top of BASE rather than as the whole answer. Capped so a
+  // pathological load cannot turn a real hang into a multi-minute wait.
+  const cpus = Math.max(1, os.availableParallelism?.() ?? os.cpus().length);
+  const load = os.loadavg()[0];
+  if (!Number.isFinite(load) || load <= 0) return BASE;
+  return Math.min(12, Math.max(BASE, Math.ceil((load / cpus) * 2)));
+}
+
+/**
+ * Scale a timeout that budgets real work (process spawn, IPC handshake, socket
+ * connect) so it survives CPU contention.
+ *
+ * Do NOT use this for deadlines that are themselves under test — a production
+ * timeout a test asserts on must stay exact, or the assertion stops meaning
+ * anything.
+ *
+ * @param {number} ms Timeout budget measured on an idle machine.
+ * @returns {number} The budget adjusted for contention.
+ */
+export function scaleTimeout(ms) {
+  return Math.round(ms * TIMEOUT_SCALE);
+}
+
 export function writeExecutable(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
 }
